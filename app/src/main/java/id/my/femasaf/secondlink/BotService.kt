@@ -23,6 +23,9 @@ import com.google.gson.Gson
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -42,6 +45,7 @@ import okhttp3.Dns
 import java.io.File
 import java.util.Calendar
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 class BotService : LifecycleService() {
 
@@ -60,6 +64,7 @@ class BotService : LifecycleService() {
     private val commandLastRun = mutableMapOf<String, Long>()
     private val menuState = TelegramMenuState()
     private lateinit var menuRouter: TelegramMenuRouter
+    private var fileServer: LocalFileServer? = null
 
     // Battery & Power Monitoring
     private var lastBatteryLevel: Int = -1
@@ -98,18 +103,18 @@ class BotService : LifecycleService() {
         menuRouter = TelegramMenuRouter(menuState, object : CommandDispatcher {
             override suspend fun dispatch(command: String, chatId: String, userId: Long): CommandResult =
                 dispatchMenuCommand(command, chatId, userId)
-        }, { System.currentTimeMillis() },
-            verifyAccessCode = { code -> Config.verifyAccessCode(this, code) },
-            deleteCodeMessage = { chatId, messageId ->
-                try { api?.deleteMessage(chatId, messageId)?.isSuccessful == true } catch (_: Exception) { false }
-            }
-        )
+        }, { System.currentTimeMillis() })
         
         lastUpdateId = Config.getLastUpdateId(this)
         
         startForegroundService()
         initBotClient()
+        if (Config.isWebServerEnabled(this)) {
+            startFileServer()
+        }
+        BotManager.onEventScheduled = { event -> scheduleEvent(event) }
         recoverReminders()
+        recoverEvents()
 
         // Register battery monitoring
         val filter = IntentFilter().apply {
@@ -123,15 +128,21 @@ class BotService : LifecycleService() {
     private fun initBotClient() {
         pollingJob?.cancel()
         val token = Config.getToken(this)
-        if (!Config.hasValidCredentials(this) || !Config.hasAccessCode(this)) {
+        if (!Config.hasValidCredentials(this)) {
             api = null
             BotManager.setStatus("Configuration Required")
-            updateNotification("Konfigurasi belum aman")
+            updateNotification("Konfigurasi belum lengkap")
             return
         }
 
+        val telegramClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(40, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
         api = Retrofit.Builder()
             .baseUrl("https://api.telegram.org/bot$token/")
+            .client(telegramClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(TelegramApi::class.java)
@@ -343,11 +354,12 @@ class BotService : LifecycleService() {
         try {
             when {
                 command == "/status" -> sendStatusUpdate(chatId)
+                command == "/doctor" -> sendTextMessage(PermissionDoctor.report(this), chatId)
                 command.startsWith("/echo") -> {
                     val echoText = command.substringAfter("/echo").trim()
                     sendTextMessage(if (echoText.isNotEmpty()) echoText else "Cron Echo", chatId)
                 }
-                command == "/scan_wifi" -> scanLocalNetwork(chatId)
+                command == "/events" -> handleEventList(chatId)
                 command.startsWith("/camera") -> {
                     val isFront = command.contains(" f")
                     sendTextMessage("Cron: Mengambil foto...", chatId)
@@ -373,7 +385,6 @@ class BotService : LifecycleService() {
         val messageAgeSeconds = (System.currentTimeMillis() / 1000L) - message.date
 
         if (!Config.hasValidCredentials(this) ||
-            !Config.hasAccessCode(this) ||
             chatId != authorizedChatId ||
             message.chat.type != "private" ||
             messageAgeSeconds !in 0..MAX_COMMAND_AGE_SECONDS) {
@@ -400,26 +411,7 @@ class BotService : LifecycleService() {
                     return@withLock
                 }
 
-                val sensitive = commandName in SENSITIVE_COMMANDS
-                val text = if (sensitive) {
-                    val suppliedCode = originalText.substringAfterLast(" #", "")
-                    if (suppliedCode.isEmpty() || !Config.verifyAccessCode(this@BotService, suppliedCode)) {
-                        sendTextMessage("🔐 Kode akses tidak valid. Format: $commandName ... #kode", chatId)
-                        BotManager.audit(chatId, commandName, "DENIED")
-                        return@withLock
-                    }
-                    val deletionSucceeded = runCatching {
-                        api?.deleteMessage(chatId, message.messageId)?.isSuccessful == true
-                    }.getOrDefault(false)
-                    if (!deletionSucceeded) {
-                        sendTextMessage("🔐 Perintah dibatalkan karena kode tidak dapat dihapus dari chat.", chatId)
-                        BotManager.audit(chatId, commandName, "SECRET_DELETE_FAILED")
-                        return@withLock
-                    }
-                    originalText.substringBeforeLast(" #").trim()
-                } else {
-                    originalText
-                }
+                val text = originalText
 
                 BotManager.audit(chatId, SecurityPolicy.redactCommand(text), "START")
                 try {
@@ -428,8 +420,25 @@ class BotService : LifecycleService() {
                         text == "/menu" || text == "/start" -> sendMainMenu(chatId, message.from?.id ?: 0L)
                         text == "/help" -> sendHelp(chatId)
                         text == "/status" -> sendStatusUpdate(chatId)
+                        text == "/doctor" -> sendTextMessage(PermissionDoctor.report(this@BotService), chatId)
+                        text == "/web" -> sendWebServerInfo(chatId)
+                        text == "/web on" || text == "/web start" -> {
+                            Config.setWebServerEnabled(this@BotService, true)
+                            startFileServer()
+                            sendWebServerInfo(chatId)
+                        }
+                        text == "/web off" || text == "/web stop" -> {
+                            Config.setWebServerEnabled(this@BotService, false)
+                            stopFileServer()
+                            sendTextMessage("⏹ Server file lokal telah dimatikan.", chatId)
+                        }
                         text == "/media" || text.startsWith("/media ") -> handleMediaCommand(text, chatId)
-                        text == "/scan_wifi" -> scanLocalNetwork(chatId)
+                        text == "/events" || text == "/event_list" -> handleEventList(chatId)
+                        text.startsWith("/event_add ") -> handleEventAdd(text, chatId)
+                        text.startsWith("/event_delete ") || text.startsWith("/event_del ") -> handleEventDelete(text, chatId)
+                        text == "/jadwal" || text.startsWith("/jadwal ") || text == "/kuliah" || text.startsWith("/kuliah ") -> handleClassScheduleCommand(text, chatId)
+                        text.startsWith("/jadwal_add ") -> handleClassScheduleAdd(text, chatId)
+                        text.startsWith("/jadwal_delete ") || text.startsWith("/jadwal_del ") -> handleClassScheduleDelete(text, chatId)
                         text.startsWith("/download ") -> handleDownload(text.substringAfter("/download").trim(), chatId)
                         text.startsWith("/echo ") -> sendTextMessage(text.substringAfter("/echo").take(1000), chatId)
                         text.startsWith("/cron_add ") -> handleCronAdd(text, chatId)
@@ -468,14 +477,14 @@ class BotService : LifecycleService() {
     /** Sends the single owner-bound command-center menu, or edits its existing message. */
     suspend fun sendMainMenu(chatId: String, userId: Long, messageId: Long? = null) {
         val apiRef = api ?: return
-        if (!Config.hasValidCredentials(this) || !Config.hasAccessCode(this) || chatId != Config.getChatId(this)) return
+        if (!Config.hasValidCredentials(this) || chatId != Config.getChatId(this)) return
         val renderState = MenuRenderState(
-            unlocked = menuState.isUnlocked(chatId, userId),
+            unlocked = true,
             mediaReady = runCatching { mediaControllerManager.hasAccess() }.getOrDefault(false),
             mediaSessionCount = 0
         )
         val markup = Gson().toJson(TelegramKeyboard.render(MenuScreen.MAIN, renderState))
-        val text = "SecondLink Remote Control\nStatus: Connected\nMedia: ${if (renderState.mediaReady) "Ready" else "Akses diperlukan"}\nSecurity: ${if (renderState.unlocked) "Unlocked" else "Locked"}"
+        val text = "SecondLink Remote Control\nStatus: Connected\nMedia: ${if (renderState.mediaReady) "Ready" else "Akses diperlukan"}"
         menuState.bindMenu(chatId, userId)
         if (messageId != null) {
             val edited = runCatching { apiRef.editMessageText(chatId, messageId, text, markup).isSuccessful }.getOrDefault(false)
@@ -488,7 +497,7 @@ class BotService : LifecycleService() {
         val message = callback.message
         val chatId = message?.chat?.id?.toString()
         if (message == null || message.chat.type != "private" ||
-            !Config.hasValidCredentials(this) || !Config.hasAccessCode(this) ||
+            !Config.hasValidCredentials(this) ||
             chatId == null || chatId != Config.getChatId(this)) {
             // Do not reveal whether credentials or chat authorization failed.
             runCatching { api?.answerCallbackQuery(callback.id, "Aksi tidak diizinkan.", true) }
@@ -502,12 +511,19 @@ class BotService : LifecycleService() {
         try {
             when (result) {
                 is RouterResult.EditMenu -> {
-                    api?.editMessageText(
+                    val edited = api?.editMessageText(
                         result.chatId,
                         result.messageId,
                         result.text,
                         result.replyMarkup?.let { Gson().toJson(it) }
-                    )
+                    )?.isSuccessful == true
+                    if (!edited) {
+                        api?.sendMessage(
+                            result.chatId,
+                            result.text,
+                            replyMarkup = result.replyMarkup?.let { Gson().toJson(it) }
+                        )
+                    }
                     api?.answerCallbackQuery(result.callbackId)
                 }
                 is RouterResult.SendMessage -> {
@@ -539,6 +555,42 @@ class BotService : LifecycleService() {
                     sendStatusUpdate(chatId)
                     CommandResult("Status perangkat diperbarui.")
                 }
+                command == "/doctor" -> CommandResult(PermissionDoctor.report(this@BotService))
+                command == "/web" -> CommandResult(webServerInfo())
+                command == "/web on" || command == "/web start" -> {
+                    Config.setWebServerEnabled(this@BotService, true)
+                    startFileServer()
+                    CommandResult(webServerInfo())
+                }
+                command == "/web off" || command == "/web stop" -> {
+                    Config.setWebServerEnabled(this@BotService, false)
+                    stopFileServer()
+                    CommandResult("⏹ Server file lokal telah dimatikan.")
+                }
+                command == "/events" || command == "/event_list" -> {
+                    handleEventList(chatId)
+                    CommandResult("Daftar event ditampilkan.")
+                }
+                command.startsWith("/event_add ") -> {
+                    handleEventAdd(command, chatId)
+                    CommandResult("Tambah event diproses.")
+                }
+                command.startsWith("/event_delete ") || command.startsWith("/event_del ") -> {
+                    handleEventDelete(command, chatId)
+                    CommandResult("Hapus event diproses.")
+                }
+                command == "/jadwal" || command.startsWith("/jadwal ") || command == "/kuliah" || command.startsWith("/kuliah ") -> {
+                    handleClassScheduleCommand(command, chatId)
+                    CommandResult("Jadwal kuliah ditampilkan.")
+                }
+                command.startsWith("/jadwal_add ") -> {
+                    handleClassScheduleAdd(command, chatId)
+                    CommandResult("Tambah jadwal kuliah diproses.")
+                }
+                command.startsWith("/jadwal_delete ") || command.startsWith("/jadwal_del ") -> {
+                    handleClassScheduleDelete(command, chatId)
+                    CommandResult("Hapus jadwal kuliah diproses.")
+                }
                 command.startsWith("/media ") -> {
                     handleMediaCommand(command, chatId)
                     CommandResult("Kontrol media diproses.")
@@ -558,10 +610,6 @@ class BotService : LifecycleService() {
                     handleCronList(chatId)
                     CommandResult("Jadwal diperbarui.")
                 }
-                command == "/scan_wifi" -> {
-                    scanLocalNetwork(chatId)
-                    CommandResult("Pemindaian Wi‑Fi diproses.")
-                }
                 command == "/find" -> { startAlarm(); CommandResult("Alarm dinyalakan.") }
                 command == "/stop" -> { stopAlarm(); CommandResult("Alarm dimatikan.") }
                 else -> CommandResult("Aksi tidak tersedia.", success = false)
@@ -576,20 +624,27 @@ class BotService : LifecycleService() {
             """
                 🤖 *Daftar Perintah*
                 /status — diagnostik HP
-                /help — bantuan
-                /cron\_list — daftar jadwal
-
-                🔐 Perintah sensitif wajib diakhiri `#kode`:
-                /camera [f] #kode
-                /list\_contact #kode
-                /scan\_wifi #kode
-                /download <https-url> #kode
-                /find #kode
-                /stop #kode
-                /cron\_add <HH:mm> <cmd> #kode
-                /cron\_stop <id> #kode
-                /remind <waktu> <pesan> #kode
-                /media <aksi> #kode — kontrol media lengkap
+                /doctor — cek izin yang aktif/nonaktif
+                /web — info server file lokal
+                /web on — hidupkan server file lokal
+                /web off — matikan server file lokal
+                /jadwal [hari/all/besok] — lihat jadwal kuliah
+                /jadwal_add <hari> <jam> <matkul> — tambah jadwal kuliah
+                /jadwal_delete <id/nomor> — hapus jadwal kuliah
+                /events — lihat kalender event
+                /event_add <YYYY-MM-DD HH:mm> <judul> — tambah event baru
+                /event_delete <id/nomor> — hapus event
+                /camera [f] — ambil foto (f = kamera depan)
+                /list_contact — ambil kontak telepon
+                /download <https-url> — download file ke HP
+                /find — nyalakan alarm HP
+                /stop — matikan alarm HP
+                /cron_add <HH:mm> <cmd> — jadwal rutin harian
+                /cron_list — daftar jadwal rutin
+                /cron_stop <id> — hapus jadwal rutin
+                /remind <waktu> <pesan> — buat pengingat
+                /media <aksi> — kontrol pemutar media
+                /help — bantuan perintah
             """.trimIndent(),
             chatId
         )
@@ -722,6 +777,36 @@ class BotService : LifecycleService() {
             Log.e("BotService", "Error sending text", e)
         }
     }
+
+    private fun startFileServer() {
+        fileServer?.stop()
+        fileServer = LocalFileServer(this).also { server ->
+            if (!server.start()) {
+                BotManager.logError("Local file server failed to start")
+                fileServer = null
+            }
+        }
+    }
+
+    private fun stopFileServer() {
+        fileServer?.stop()
+        fileServer = null
+    }
+
+    private fun webServerInfo(): String {
+        val isRunning = fileServer != null
+        val address = fileServer?.address()
+        val password = Config.getWebServerPassword(this)
+        return if (isRunning && address != null) {
+            "🌐 *SECONDLINK DRIVE*\n\nStatus: 🟢 Aktif\nBuka dari browser di Wi-Fi yang sama:\n$address\n\nUsername: `admin`\nPassword: `$password`\nBatas upload: 100 MB\n\n_Ketik /web off untuk mematikan server._"
+        } else if (isRunning) {
+            "🌐 *SECONDLINK DRIVE*\n\nStatus: 🟡 Aktif (Menunggu Wi-Fi)\nHubungkan perangkat ke Wi-Fi untuk mengakses server."
+        } else {
+            "🌐 *SECONDLINK DRIVE*\n\nStatus: 🔴 Nonaktif\nServer file sedang dimatikan.\n\n_Ketik /web on untuk menghidupkan server._"
+        }
+    }
+
+    private suspend fun sendWebServerInfo(chatId: String) = sendTextMessage(webServerInfo(), chatId)
 
     private suspend fun sendPhoto(file: File) {
         val apiRef = api ?: return
@@ -863,24 +948,354 @@ class BotService : LifecycleService() {
         }
     }
 
-    private suspend fun scanLocalNetwork(targetChatId: String) {
-        val nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
-        val devices = mutableSetOf<String>()
-        sendTextMessage("🔍 Scanning WiFi...", targetChatId)
-        val listener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(s: String) {}
-            override fun onServiceFound(si: NsdServiceInfo) { devices.add("• ${si.serviceName} (${si.serviceType})") }
-            override fun onServiceLost(si: NsdServiceInfo) {}
-            override fun onDiscoveryStopped(s: String) {}
-            override fun onStartDiscoveryFailed(s: String, e: Int) { nsdManager.stopServiceDiscovery(this) }
-            override fun onStopDiscoveryFailed(s: String, e: Int) { nsdManager.stopServiceDiscovery(this) }
+    private fun recoverEvents() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val pending = BotManager.getPendingEvents()
+            for (event in pending) {
+                scheduleEvent(event)
+            }
         }
-        try {
-            nsdManager.discoverServices("_http._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
-            delay(10000)
-            nsdManager.stopServiceDiscovery(listener)
-            sendTextMessage(if (devices.isEmpty()) "❌ Tidak ditemukan perangkat." else "✅ *Ditemukan:* \n${devices.joinToString("\n")}", targetChatId)
-        } catch (e: Exception) { sendTextMessage("Pemindaian gagal.", targetChatId) }
+    }
+
+    private fun scheduleEvent(event: EventEntity) {
+        val now = System.currentTimeMillis()
+        val delayTime = event.eventTime - now
+        if (delayTime > 0) {
+            lifecycleScope.launch {
+                delay(delayTime)
+                triggerEvent(event)
+            }
+        } else {
+            lifecycleScope.launch {
+                triggerEvent(event, overdue = true)
+            }
+        }
+    }
+
+    private suspend fun triggerEvent(event: EventEntity, overdue: Boolean = false) {
+        val sdf = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault())
+        val dateFormatted = sdf.format(Date(event.eventTime))
+        val header = if (overdue) "⏰ *EVENT TERLEWAT*" else "📅 *PENGINGAT EVENT CALENDAR*"
+        val text = buildString {
+            append("$header\n\n")
+            append("📌 *${event.title}*\n")
+            append("⏰ Waktu: $dateFormatted\n")
+            if (event.description.isNotBlank()) {
+                append("📝 Catatan: ${event.description}\n")
+            }
+        }
+        sendTextMessage(text)
+        postLocalNotification("📅 Event: ${event.title}", "Waktu: $dateFormatted")
+        BotManager.markEventNotified(event.id)
+    }
+
+    private fun postLocalNotification(title: String, message: String) {
+        val channelId = "secondlink_events"
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Event Calendar Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifikasi pengingat event kalender"
+                enableVibration(true)
+            }
+            manager.createNotificationChannel(channel)
+        }
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        manager.notify((System.currentTimeMillis() % 100000).toInt() + 100, notification)
+    }
+
+    private suspend fun handleEventList(chatId: String) {
+        val events = BotManager.getEventsList()
+        if (events.isEmpty()) {
+            sendTextMessage("📅 *Kalender Event Kosong.*\nGunakan /event_add <YYYY-MM-DD HH:mm> <judul> untuk menambah event.", chatId)
+            return
+        }
+        val sdf = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault())
+        val text = buildString {
+            append("📅 *DAFTAR EVENT CALENDAR*\n\n")
+            events.forEachIndexed { index, event ->
+                val status = if (event.isNotified) "✅ Selesai" else if (event.eventTime < System.currentTimeMillis()) "⏰ Terlewat" else "⏳ Mendatang"
+                append("${index + 1}. 📌 *${event.title}* ($status)\n")
+                append("   ⏰ ${sdf.format(Date(event.eventTime))}\n")
+                if (event.description.isNotBlank()) {
+                    append("   📝 ${event.description}\n")
+                }
+                append("   ID: `${event.id}`\n\n")
+            }
+            append("_Hapus event dengan /event_delete <id atau nomor>_")
+        }
+        sendTextMessage(text, chatId)
+    }
+
+    private fun handleEventAdd(text: String, chatId: String) {
+        val raw = text.removePrefix("/event_add").trim()
+        val parts = raw.split(" ", limit = 3)
+        if (parts.size < 3) {
+            lifecycleScope.launch {
+                sendTextMessage("❌ Format: /event_add <YYYY-MM-DD> <HH:mm> <judul event>\nContoh: `/event_add 2026-08-17 15:30 Rapat Tim`", chatId)
+            }
+            return
+        }
+        val dateTimeStr = "${parts[0]} ${parts[1]}"
+        val parsedEpoch = parseEventTime(dateTimeStr)
+        if (parsedEpoch <= 0L) {
+            lifecycleScope.launch {
+                sendTextMessage("❌ Format tanggal/jam tidak valid. Contoh: `2026-08-17 15:30` atau `17-08-2026 15:30`", chatId)
+            }
+            return
+        }
+        val titleAndDesc = parts[2].split("|", limit = 2)
+        val title = titleAndDesc[0].trim()
+        val desc = if (titleAndDesc.size > 1) titleAndDesc[1].trim() else ""
+        if (title.isEmpty()) {
+            lifecycleScope.launch { sendTextMessage("❌ Judul event tidak boleh kosong.", chatId) }
+            return
+        }
+        val id = UUID.randomUUID().toString()
+        BotManager.addEvent(id, title, desc, parsedEpoch)
+        val sdf = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault())
+        lifecycleScope.launch {
+            sendTextMessage("✅ *Event Berhasil Ditambahkan!*\n\n📌 *${title}*\n⏰ ${sdf.format(Date(parsedEpoch))}${if (desc.isNotEmpty()) "\n📝 $desc" else ""}", chatId)
+        }
+    }
+
+    private fun handleEventDelete(text: String, chatId: String) {
+        val target = text.removePrefix("/event_delete").removePrefix("/event_del").trim()
+        if (target.isEmpty()) {
+            lifecycleScope.launch { sendTextMessage("❌ Format: /event_delete <id atau nomor urut>", chatId) }
+            return
+        }
+        lifecycleScope.launch {
+            val events = BotManager.getEventsList()
+            val index = target.toIntOrNull()
+            val eventToDelete = if (index != null && index in 1..events.size) {
+                events[index - 1]
+            } else {
+                events.find { it.id.equals(target, ignoreCase = true) || it.id.startsWith(target) }
+            }
+            if (eventToDelete != null) {
+                BotManager.deleteEvent(eventToDelete.id)
+                sendTextMessage("🗑️ Event *${eventToDelete.title}* berhasil dihapus.", chatId)
+            } else {
+                sendTextMessage("❌ Event tidak ditemukan.", chatId)
+            }
+        }
+    }
+
+    private fun parseEventTime(input: String): Long {
+        val patterns = listOf(
+            "yyyy-MM-dd HH:mm",
+            "dd-MM-yyyy HH:mm",
+            "yyyy/MM/dd HH:mm",
+            "dd/MM/yyyy HH:mm"
+        )
+        for (pattern in patterns) {
+            try {
+                val sdf = SimpleDateFormat(pattern, Locale.getDefault()).apply {
+                    isLenient = false
+                }
+                val date = sdf.parse(input)
+                if (date != null) return date.time
+            } catch (_: Exception) {}
+        }
+        return -1L
+    }
+
+    private suspend fun handleClassScheduleCommand(text: String, chatId: String) {
+        val arg = text.removePrefix("/jadwal").removePrefix("/kuliah").trim().lowercase()
+        val allSchedules = BotManager.getClassSchedulesList()
+        if (allSchedules.isEmpty()) {
+            sendTextMessage(
+                """
+                    🎓 *Belum ada jadwal kuliah yang diatur.*
+                    
+                    Gunakan tombol *➕ Tambah Jadwal* atau ketik:
+                    `/jadwal_add <hari> <jam_mulai-jam_selesai> <mata_kuliah> | <ruangan> [| dosen]`
+                    
+                    _Contoh:_ `/jadwal_add Senin 08:00-10:30 Pemrograman Web | Lab 2 | Pak Budi`
+                """.trimIndent(),
+                chatId
+            )
+            return
+        }
+
+        if (arg == "all" || arg == "semua" || arg == "semuahari" || arg == "minggu_ini") {
+            val textBuilder = StringBuilder()
+            textBuilder.append("🎓 *JADWAL KULIAH MINGGUAN*\n\n")
+            val dayNames = listOf("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+            var countTotal = 0
+            for (dayNum in 1..7) {
+                val daySchedules = allSchedules.filter { it.dayOfWeek == dayNum }
+                if (daySchedules.isNotEmpty()) {
+                    textBuilder.append("📌 *${dayNames[dayNum - 1]}*\n")
+                    daySchedules.forEach { s ->
+                        countTotal++
+                        textBuilder.append("   • `${s.startTime} - ${s.endTime}`: *${s.subject}*\n")
+                        textBuilder.append("     📍 Ruang: ${s.room}\n")
+                        if (s.lecturer.isNotBlank()) {
+                            textBuilder.append("     👨‍🏫 Dosen: ${s.lecturer}\n")
+                        }
+                    }
+                    textBuilder.append("\n")
+                }
+            }
+            if (countTotal == 0) {
+                sendTextMessage("🎓 Belum ada jadwal kuliah yang tersimpan.", chatId)
+                return
+            }
+            textBuilder.append("_Gunakan /jadwal <hari> atau tombol menu untuk melihat per hari._")
+            sendTextMessage(textBuilder.toString().trim(), chatId)
+            return
+        }
+
+        val targetDayNum = when (arg) {
+            "", "today", "hari ini", "hari_ini" -> currentDayOfWeek()
+            "tomorrow", "besok" -> (currentDayOfWeek() % 7) + 1
+            "1", "senin", "mon", "monday" -> 1
+            "2", "selasa", "tue", "tuesday" -> 2
+            "3", "rabu", "wed", "wednesday" -> 3
+            "4", "kamis", "thu", "thursday" -> 4
+            "5", "jumat", "jum'at", "fri", "friday" -> 5
+            "6", "sabtu", "sat", "saturday" -> 6
+            "7", "minggu", "ahad", "sun", "sunday" -> 7
+            else -> null
+        }
+
+        if (targetDayNum == null) {
+            sendTextMessage("❌ Hari tidak dikenal. Contoh: `/jadwal senin`, `/jadwal besok`, atau `/jadwal all`.", chatId)
+            return
+        }
+
+        val dayNames = listOf("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+        val dayName = dayNames[targetDayNum - 1]
+        val daySchedules = allSchedules.filter { it.dayOfWeek == targetDayNum }
+
+        if (daySchedules.isEmpty()) {
+            val statusMessage = when (arg) {
+                "", "today", "hari ini", "hari_ini" -> "🎓 *Tidak ada jadwal kuliah untuk hari ini ($dayName).* 🎉\n_Tidak ada kegiatan kuliah terjadwal._"
+                "tomorrow", "besok" -> "🎓 *Tidak ada jadwal kuliah untuk besok ($dayName).* 🎉\n_Tidak ada kegiatan kuliah terjadwal._"
+                else -> "🎓 *Tidak ada jadwal kuliah untuk hari $dayName.* 🎉"
+            }
+            sendTextMessage(statusMessage, chatId)
+            return
+        }
+
+        val textBuilder = StringBuilder()
+        textBuilder.append("🎓 *JADWAL KULIAH - $dayName*\n\n")
+        daySchedules.forEachIndexed { index, s ->
+            textBuilder.append("${index + 1}. ⏰ `${s.startTime} - ${s.endTime}`\n")
+            textBuilder.append("   📖 *${s.subject}*\n")
+            textBuilder.append("   📍 Ruang: ${s.room}\n")
+            if (s.lecturer.isNotBlank()) textBuilder.append("   👨‍🏫 Dosen: ${s.lecturer}\n")
+            textBuilder.append("\n")
+        }
+        sendTextMessage(textBuilder.toString().trim(), chatId)
+    }
+
+    private fun handleClassScheduleAdd(text: String, chatId: String) {
+        val raw = text.removePrefix("/jadwal_add").trim()
+        val parts = raw.split(" ", limit = 3)
+        if (parts.size < 3) {
+            lifecycleScope.launch {
+                sendTextMessage("❌ Format: /jadwal_add <hari> <jam_mulai-jam_selesai> <mata kuliah> | <ruangan> [| dosen]\nContoh:\n`/jadwal_add senin 08:00-10:30 Pemrograman Web | Lab 2 | Pak Budi`", chatId)
+            }
+            return
+        }
+        val dayNumber = parseDayOfWeekString(parts[0])
+        if (dayNumber == null) {
+            lifecycleScope.launch {
+                sendTextMessage("❌ Hari tidak valid. Gunakan nama hari (Senin, Selasa, dll.) atau angka 1-7.", chatId)
+            }
+            return
+        }
+        val timeRange = parts[1].replace(" ", "")
+        val timeParts = timeRange.split("-")
+        val startTime = timeParts.getOrNull(0)?.trim() ?: ""
+        val endTime = timeParts.getOrNull(1)?.trim() ?: ""
+        if (startTime.isEmpty() || endTime.isEmpty()) {
+            lifecycleScope.launch {
+                sendTextMessage("❌ Format jam harus berupa rentang. Contoh: `08:00-10:30`", chatId)
+            }
+            return
+        }
+        val detailParts = parts[2].split("|").map { it.trim() }
+        val subject = detailParts.getOrNull(0) ?: ""
+        if (subject.isEmpty()) {
+            lifecycleScope.launch { sendTextMessage("❌ Nama mata kuliah tidak boleh kosong.", chatId) }
+            return
+        }
+        val room = detailParts.getOrNull(1) ?: ""
+        if (room.isEmpty()) {
+            lifecycleScope.launch { sendTextMessage("❌ Ruangan tidak boleh kosong. Format: `Mata Kuliah | Ruangan [| Dosen]`", chatId) }
+            return
+        }
+        val lecturer = detailParts.getOrNull(2) ?: ""
+        val id = UUID.randomUUID().toString()
+        BotManager.addClassSchedule(id, dayNumber, startTime, endTime, subject, room, lecturer)
+        val dayNames = listOf("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+        lifecycleScope.launch {
+            sendTextMessage("✅ *Jadwal Kuliah Berhasil Ditambahkan!*\n\n📅 Hari: *${dayNames[dayNumber - 1]}*\n⏰ Jam: `${startTime} - ${endTime}`\n📖 Matkul: *${subject}*\n📍 Ruang: *${room}*${if (lecturer.isNotEmpty()) "\n👨‍🏫 Dosen: $lecturer" else ""}", chatId)
+        }
+    }
+
+    private fun handleClassScheduleDelete(text: String, chatId: String) {
+        val target = text.removePrefix("/jadwal_delete").removePrefix("/jadwal_del").trim()
+        if (target.isEmpty()) {
+            lifecycleScope.launch { sendTextMessage("❌ Format: /jadwal_delete <id atau nomor urut>", chatId) }
+            return
+        }
+        lifecycleScope.launch {
+            val allSchedules = BotManager.getClassSchedulesList()
+            val index = target.toIntOrNull()
+            val toDelete = if (index != null && index in 1..allSchedules.size) {
+                allSchedules[index - 1]
+            } else {
+                allSchedules.find { it.id.equals(target, ignoreCase = true) || it.id.startsWith(target) }
+            }
+            if (toDelete != null) {
+                BotManager.deleteClassSchedule(toDelete.id)
+                sendTextMessage("🗑️ Jadwal *${toDelete.subject}* (${toDelete.startTime}) berhasil dihapus.", chatId)
+            } else {
+                sendTextMessage("❌ Jadwal kuliah tidak ditemukan.", chatId)
+            }
+        }
+    }
+
+    private fun currentDayOfWeek(): Int {
+        val cal = Calendar.getInstance()
+        return when (cal.get(Calendar.DAY_OF_WEEK)) {
+            Calendar.MONDAY -> 1
+            Calendar.TUESDAY -> 2
+            Calendar.WEDNESDAY -> 3
+            Calendar.THURSDAY -> 4
+            Calendar.FRIDAY -> 5
+            Calendar.SATURDAY -> 6
+            Calendar.SUNDAY -> 7
+            else -> 1
+        }
+    }
+
+    private fun parseDayOfWeekString(input: String): Int? {
+        val clean = input.trim().lowercase()
+        return when (clean) {
+            "1", "senin", "mon", "monday" -> 1
+            "2", "selasa", "tue", "tuesday" -> 2
+            "3", "rabu", "wed", "wednesday" -> 3
+            "4", "kamis", "thu", "thursday" -> 4
+            "5", "jumat", "jum'at", "fri", "friday" -> 5
+            "6", "sabtu", "sat", "saturday" -> 6
+            "7", "minggu", "ahad", "sun", "sunday" -> 7
+            else -> null
+        }
     }
 
     private suspend fun handleDownload(url: String, targetChatId: String) {
@@ -909,42 +1324,43 @@ class BotService : LifecycleService() {
                     override fun lookup(hostname: String): List<java.net.InetAddress> =
                         if (hostname.equals(host, ignoreCase = true)) addresses else emptyList()
                 })
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
                 .build()
-            val request = Request.Builder().url(uri.toString()).get().build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful || response.isRedirect) {
-                    sendTextMessage("❌ Server menolak unduhan atau mencoba redirect.", targetChatId)
-                    return@withContext
-                }
-                val body = response.body ?: run {
-                    sendTextMessage("❌ Respons unduhan kosong.", targetChatId)
-                    return@withContext
-                }
-                if (body.contentLength() > MAX_DOWNLOAD_BYTES) {
-                    sendTextMessage("❌ File melebihi batas 25 MB.", targetChatId)
-                    return@withContext
-                }
-                val directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
-                val output = File(directory, fileName)
-                body.byteStream().use { input ->
-                    output.outputStream().use { sink ->
-                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                        var total = 0L
-                        while (true) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            total += count
-                            if (total > MAX_DOWNLOAD_BYTES) {
-                                output.delete()
-                                sendTextMessage("❌ File melebihi batas 25 MB.", targetChatId)
-                                return@withContext
-                            }
-                            sink.write(buffer, 0, count)
+
+            val request = Request.Builder().url(url).build()
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                sendTextMessage("❌ Unduhan gagal: HTTP ${response.code}", targetChatId)
+                return@withContext
+            }
+            val body = response.body
+            val contentLength = body?.contentLength() ?: -1L
+            if (contentLength > MAX_DOWNLOAD_BYTES) {
+                sendTextMessage("❌ File terlalu besar (maksimal 25 MB).", targetChatId)
+                return@withContext
+            }
+
+            val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            if (!downloadsDir.exists()) downloadsDir.mkdirs()
+            val output = File(downloadsDir, fileName)
+            var totalBytes = 0L
+            body?.byteStream()?.use { input ->
+                output.outputStream().use { sink ->
+                    val buffer = ByteArray(8 * 1024)
+                    var count: Int
+                    while (input.read(buffer).also { count = it } != -1) {
+                        totalBytes += count
+                        if (totalBytes > MAX_DOWNLOAD_BYTES) {
+                            output.delete()
+                            sendTextMessage("❌ File melebihi batas 25 MB.", targetChatId)
+                            return@withContext
                         }
+                        sink.write(buffer, 0, count)
                     }
                 }
-                sendTextMessage("✅ Download aman selesai: $fileName (${output.parent})", targetChatId)
             }
+            sendTextMessage("✅ Download aman selesai: $fileName (${output.parent})", targetChatId)
           } catch (e: Exception) {
               Log.e("BotService", "Secure download failed")
               sendTextMessage("❌ Unduhan gagal.", targetChatId)
@@ -955,6 +1371,14 @@ class BotService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             "RESTART_POLLING" -> initBotClient()
+            "START_WEB_SERVER" -> {
+                Config.setWebServerEnabled(this, true)
+                startFileServer()
+            }
+            "STOP_WEB_SERVER" -> {
+                Config.setWebServerEnabled(this, false)
+                stopFileServer()
+            }
             "EXIT_APP" -> {
                 Config.setBotEnabled(this, false)
                 BotManager.setStatus("Disabled")
@@ -968,6 +1392,8 @@ class BotService : LifecycleService() {
 
     override fun onDestroy() {
         pollingJob?.cancel()
+        fileServer?.stop()
+        fileServer = null
         try { unregisterReceiver(batteryReceiver) } catch (e: Exception) {}
         if (::cameraHelper.isInitialized) cameraHelper.shutdown()
         super.onDestroy()
@@ -976,7 +1402,8 @@ class BotService : LifecycleService() {
     private fun isAllowedCronCommand(command: String): Boolean {
         val clean = command.trim()
         return clean == "/status" ||
-            clean == "/scan_wifi" ||
+            clean == "/events" ||
+            clean.startsWith("/jadwal") ||
             clean == "/camera" ||
             clean == "/camera f" ||
             (clean.startsWith("/echo ") && clean.length <= 500)
@@ -992,12 +1419,8 @@ class BotService : LifecycleService() {
         private const val MAX_DOWNLOAD_BYTES = 25L * 1024 * 1024
         private const val MAX_COMMAND_AGE_SECONDS = 300L
 
-        private val SENSITIVE_COMMANDS = setOf(
-            "/camera", "/list_contact", "/scan_wifi", "/download",
-            "/find", "/stop", "/cron_add", "/cron_stop", "/remind", "/media"
-        )
         private val HEAVY_COMMANDS = setOf(
-            "/camera", "/list_contact", "/scan_wifi", "/download"
+            "/camera", "/list_contact", "/download"
         )
     }
 }

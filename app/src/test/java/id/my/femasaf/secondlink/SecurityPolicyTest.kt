@@ -23,11 +23,12 @@ class SecurityPolicyTest {
     }
 
     @Test
-    fun accessCodeRequiresLengthLettersAndDigits() {
-        assertFalse(SecurityPolicy.isStrongAccessCode("short1"))
-        assertFalse(SecurityPolicy.isStrongAccessCode("onlyletters"))
-        assertFalse(SecurityPolicy.isStrongAccessCode("12345678"))
-        assertTrue(SecurityPolicy.isStrongAccessCode("SecondLink2026"))
+    fun webServerPasswordValidation() {
+        assertFalse(SecurityPolicy.isValidWebServerPassword(""))
+        assertFalse(SecurityPolicy.isValidWebServerPassword("123"))
+        assertTrue(SecurityPolicy.isValidWebServerPassword("1234"))
+        assertTrue(SecurityPolicy.isValidWebServerPassword("admin123"))
+        assertTrue(SecurityPolicy.isValidWebServerPassword("SecondLink2026"))
     }
 
     @Test

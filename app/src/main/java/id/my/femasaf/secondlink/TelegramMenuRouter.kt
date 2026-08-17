@@ -35,9 +35,7 @@ sealed interface RouterResult {
 class TelegramMenuRouter(
     private val state: TelegramMenuState,
     private val dispatcher: CommandDispatcher,
-    private val clock: () -> Long,
-    private val verifyAccessCode: (String) -> Boolean = { false },
-    private val deleteCodeMessage: suspend (String, Long) -> Boolean = { _, _ -> false }
+    private val clock: () -> Long
 ) {
     companion object {
         private const val MAX_CALLBACK_AGE_SECONDS = 5 * 60L
@@ -49,18 +47,13 @@ class TelegramMenuRouter(
         private const val MAX_REMINDER_DELAY_MS = 30L * 24 * 60 * 60 * 1000
         private val REMINDER_DURATION = Regex("\\d{1,8}[smh]", RegexOption.IGNORE_CASE)
         private val CRON_TIME = Regex("\\d{1,2}:\\d{2}")
-        private val PUBLIC_FLAT = setOf("menu", "main", "status", "back", "close")
+        private val PUBLIC_FLAT = setOf("menu", "main", "status", "doctor", "web", "back", "close")
         private val SCOPES = TelegramKeyboard.scopedActions.keys
     }
 
     private data class Parsed(val scope: String?, val action: String, val nonce: String?)
     private val requestTimes = mutableMapOf<String, ArrayDeque<Long>>()
     private val lastRun = mutableMapOf<String, Long>()
-
-    suspend fun startUnlock(chatId: String, userId: Long): RouterResult {
-        state.beginInput(chatId, userId, InputKind.ACCESS_CODE, now = clock())
-        return RouterResult.SendMessage("", chatId, "🔐 Kirim kode akses Anda sebagai pesan untuk membuka sesi.")
-    }
 
     /** Handles a text message only when an owner-bound guided flow is pending. */
     suspend fun acceptTextInput(message: TelegramMessage): RouterResult {
@@ -80,18 +73,6 @@ class TelegramMenuRouter(
         }
 
         return when (pending.kind) {
-            InputKind.ACCESS_CODE -> {
-                if (!verifyAccessCode(text)) {
-                    state.beginInput(chatId, userId, InputKind.ACCESS_CODE, now = now)
-                    RouterResult.SendMessage("", chatId, "🔐 Kode akses tidak valid. Coba lagi atau kirim /cancel.")
-                } else if (!try { deleteCodeMessage(chatId, message.messageId) } catch (_: Exception) { false }) {
-                    state.beginInput(chatId, userId, InputKind.ACCESS_CODE, now = now)
-                    RouterResult.SendMessage("", chatId, "🔐 Kode tidak dapat dihapus dari chat. Sesi tetap terkunci.")
-                } else {
-                    state.unlock(chatId, userId, now)
-                    RouterResult.SendMessage("", chatId, "🔓 Akses dibuka selama lima menit.")
-                }
-            }
             InputKind.DOWNLOAD_URL -> {
                 val uri = runCatching { android.net.Uri.parse(text) }.getOrNull()
                 if (uri?.scheme?.equals("https", true) != true || uri.host.isNullOrBlank() ||
@@ -125,6 +106,55 @@ class TelegramMenuRouter(
                     retry(pending, chatId, userId, now, "❌ Command tidak diizinkan.")
                 } else dispatchInput("/cron_add ${pending.values["time"].orEmpty()} $text", chatId, userId)
             }
+            InputKind.EVENT_TIME -> {
+                val parsedEpoch = parseEventTime(text)
+                if (parsedEpoch <= 0L) {
+                    retry(pending, chatId, userId, now, "❌ Format waktu tidak valid. Gunakan format YYYY-MM-DD HH:mm (contoh: 2026-08-17 15:30) atau DD-MM-YYYY HH:mm.")
+                } else {
+                    state.beginInput(chatId, userId, InputKind.EVENT_TITLE, mapOf("time" to text), now)
+                    RouterResult.SendMessage("", chatId, "📝 Kirim judul event (dan opsional catatan, contoh: Rapat Tim | Ruang Zoom), atau /cancel.")
+                }
+            }
+            InputKind.EVENT_TITLE -> {
+                if (text.length > 500) {
+                    retry(pending, chatId, userId, now, "❌ Judul terlalu panjang (maksimal 500 karakter).")
+                } else {
+                    dispatchInput("/event_add ${pending.values["time"].orEmpty()} $text", chatId, userId)
+                }
+            }
+            InputKind.EVENT_DELETE -> {
+                dispatchInput("/event_delete $text", chatId, userId)
+            }
+            InputKind.JADWAL_DAY -> {
+                val dayNumber = parseDayOfWeek(text)
+                if (dayNumber == null) {
+                    retry(pending, chatId, userId, now, "❌ Hari tidak valid. Masukkan nama hari (Senin, Selasa, Rabu, Kamis, Jumat, Sabtu, Minggu) atau nomor (1-7), atau /cancel.")
+                } else {
+                    state.beginInput(chatId, userId, InputKind.JADWAL_TIME, mapOf("day" to dayNumber.toString()), now)
+                    RouterResult.SendMessage("", chatId, "⏰ Masukkan jam kuliah (contoh: `08:00-10:30` atau `08:00 10:30`), atau /cancel.")
+                }
+            }
+            InputKind.JADWAL_TIME -> {
+                val cleanTime = text.replace(" ", "-")
+                if (!cleanTime.contains("-") || cleanTime.length < 9) {
+                    retry(pending, chatId, userId, now, "❌ Format jam tidak valid. Contoh: `08:00-10:30`, atau /cancel.")
+                } else {
+                    state.beginInput(chatId, userId, InputKind.JADWAL_DETAILS, mapOf("day" to pending.values["day"].orEmpty(), "time" to cleanTime), now)
+                    RouterResult.SendMessage("", chatId, "📚 Masukkan format: `Mata Kuliah | Ruangan [| Dosen opsional]`\nContoh: `Pemrograman Web | Lab Komputer 2 | Pak Budi`, atau /cancel.")
+                }
+            }
+            InputKind.JADWAL_DETAILS -> {
+                if (text.isEmpty() || text.length > 500) {
+                    retry(pending, chatId, userId, now, "❌ Detail mata kuliah tidak boleh kosong atau lebih dari 500 karakter.")
+                } else {
+                    val day = pending.values["day"].orEmpty()
+                    val time = pending.values["time"].orEmpty()
+                    dispatchInput("/jadwal_add $day $time $text", chatId, userId)
+                }
+            }
+            InputKind.JADWAL_DELETE -> {
+                dispatchInput("/jadwal_delete $text", chatId, userId)
+            }
         }
     }
 
@@ -153,25 +183,12 @@ class TelegramMenuRouter(
         val parsed = parse(rawData) ?: return answer(callback, "Aksi tidak valid.")
         // A first public menu callback establishes the in-memory owner binding;
         // subsequent callbacks from another user are rejected above.
-        if (!state.hasAnyOwner() && !isSensitive(parsed)) state.bindMenu(chatId, userId)
+        if (!state.hasAnyOwner()) state.bindMenu(chatId, userId)
         if (!allowRequest("$chatId:$userId", parsed.action, now)) {
             return answer(callback, "Terlalu banyak aksi. Coba lagi sebentar.")
         }
 
-        val sensitive = isSensitive(parsed)
-        if (parsed.action == "lock") {
-            state.lock(chatId, userId)
-            return answer(callback, "Sesi dikunci.")
-        }
         if (parsed.scope == "file" && parsed.action == "cancel") return cancelInput(chatId, userId)
-        if (sensitive && !state.isUnlocked(chatId, userId, now)) {
-            return answer(callback, "🔐 Buka akses terlebih dahulu.", true)
-        }
-        if (parsed.action == "unlock") {
-            return startUnlock(chatId, userId).let { result ->
-                if (result is RouterResult.SendMessage) result.copy(callbackId = callback.id) else result
-            }
-        }
 
         if (parsed.action == "close") {
             state.clear(chatId, userId)
@@ -180,31 +197,37 @@ class TelegramMenuRouter(
         if (parsed.action == "menu" || parsed.action == "main" || parsed.action == "back") {
             return edit(callback, chatId, message.messageId, mainText(), TelegramKeyboard.render(MenuScreen.MAIN, MenuRenderState()))
         }
+        if (parsed.scope == "jadwal" && parsed.action == "days") {
+            return edit(callback, chatId, message.messageId, screenTitle(MenuScreen.CLASS_SCHEDULE_DAYS), TelegramKeyboard.render(MenuScreen.CLASS_SCHEDULE_DAYS, MenuRenderState()))
+        }
+        if (parsed.scope == "jadwal" && parsed.action == "back") {
+            return edit(callback, chatId, message.messageId, screenTitle(MenuScreen.CLASS_SCHEDULE), TelegramKeyboard.render(MenuScreen.CLASS_SCHEDULE, MenuRenderState()))
+        }
         if (parsed.scope == "menu") {
             val screen = when (parsed.action) {
                 "status" -> MenuScreen.STATUS
+                "web" -> MenuScreen.WEB
+                "event" -> MenuScreen.EVENT
+                "jadwal" -> MenuScreen.CLASS_SCHEDULE
                 "media" -> MenuScreen.MEDIA
                 "camera" -> MenuScreen.CAMERA
                 "device" -> MenuScreen.DEVICE
                 "schedule" -> MenuScreen.SCHEDULE
                 "file" -> MenuScreen.FILE
-                "security" -> MenuScreen.SECURITY
                 else -> MenuScreen.MAIN
             }
             return edit(callback, chatId, message.messageId, screenTitle(screen), TelegramKeyboard.render(screen, MenuRenderState()))
         }
-        if (parsed.scope == "security" && parsed.action == "status") {
-            val text = if (state.isUnlocked(chatId, userId, now)) "🔓 Sesi terbuka." else "🔒 Sesi terkunci."
-            return edit(callback, chatId, message.messageId, text, TelegramKeyboard.render(MenuScreen.SECURITY, MenuRenderState(state.isUnlocked(chatId, userId, now))))
-        }
-        if (parsed.scope == null && parsed.action in setOf("media", "camera", "device", "schedule", "file", "security")) {
+        if (parsed.scope == null && parsed.action in setOf("web", "event", "jadwal", "media", "camera", "device", "schedule", "file")) {
             val screen = when (parsed.action) {
+                "web" -> MenuScreen.WEB
+                "event" -> MenuScreen.EVENT
+                "jadwal" -> MenuScreen.CLASS_SCHEDULE
                 "media" -> MenuScreen.MEDIA
                 "camera" -> MenuScreen.CAMERA
                 "device" -> MenuScreen.DEVICE
                 "schedule" -> MenuScreen.SCHEDULE
-                "file" -> MenuScreen.FILE
-                else -> MenuScreen.SECURITY
+                else -> MenuScreen.FILE
             }
             return edit(callback, chatId, message.messageId, screenTitle(screen), TelegramKeyboard.render(screen, MenuRenderState()))
         }
@@ -214,6 +237,12 @@ class TelegramMenuRouter(
             catch (_: Exception) { CommandResult("❌ Perintah gagal diproses.", success = false) }
         val markup = result.replyMarkup ?: if (parsed.scope == null && parsed.action == "status") {
             TelegramKeyboard.render(MenuScreen.STATUS, MenuRenderState())
+        } else if (parsed.scope == "web" || (parsed.scope == null && parsed.action == "web")) {
+            TelegramKeyboard.render(MenuScreen.WEB, MenuRenderState())
+        } else if (parsed.scope == "event" || (parsed.scope == null && parsed.action == "event")) {
+            TelegramKeyboard.render(MenuScreen.EVENT, MenuRenderState())
+        } else if (parsed.scope == "jadwal" || (parsed.scope == null && parsed.action == "jadwal")) {
+            TelegramKeyboard.render(MenuScreen.CLASS_SCHEDULE, MenuRenderState())
         } else null
         return edit(callback, chatId, message.messageId, result.message ?: "✅ Selesai.", markup)
     }
@@ -251,9 +280,27 @@ class TelegramMenuRouter(
     private fun commandFor(parsed: Parsed): String? {
         if (parsed.scope == null) return when (parsed.action) {
             "status" -> "/status"
+            "doctor" -> "/doctor"
+            "web" -> "/web"
+            "event" -> "/events"
+            "jadwal" -> "/jadwal"
             else -> null
         }
         return when (parsed.scope to parsed.action) {
+            "web" to "status" -> "/web"
+            "web" to "on" -> "/web on"
+            "web" to "off" -> "/web off"
+            "event" to "list" -> "/events"
+            "jadwal" to "today" -> "/jadwal today"
+            "jadwal" to "tomorrow" -> "/jadwal tomorrow"
+            "jadwal" to "all" -> "/jadwal all"
+            "jadwal" to "day_1" -> "/jadwal senin"
+            "jadwal" to "day_2" -> "/jadwal selasa"
+            "jadwal" to "day_3" -> "/jadwal rabu"
+            "jadwal" to "day_4" -> "/jadwal kamis"
+            "jadwal" to "day_5" -> "/jadwal jumat"
+            "jadwal" to "day_6" -> "/jadwal sabtu"
+            "jadwal" to "day_7" -> "/jadwal minggu"
             "media" to "status" -> "/media status"
             "media" to "sessions", "media" to "list" -> "/media list"
             "media" to "play", "media" to "pause", "media" to "toggle", "media" to "next",
@@ -264,7 +311,6 @@ class TelegramMenuRouter(
             "camera" to "front" -> "/camera f"
             "camera" to "back", "camera" to "capture" -> "/camera"
             "device" to "contacts" -> "/list_contact"
-            "device" to "wifi" -> "/scan_wifi"
             "device" to "alarm_on" -> "/find"
             "device" to "alarm_off" -> "/stop"
             "schedule" to "list" -> "/cron_list"
@@ -283,6 +329,10 @@ class TelegramMenuRouter(
             "media" to "volume" -> state.beginInput(chatId, callback.from.id, InputKind.CRON_COMMAND, mapOf("media" to "volume"), now)
             "schedule" to "reminder" -> state.beginInput(chatId, callback.from.id, InputKind.REMINDER_DURATION, now = now)
             "schedule" to "add" -> state.beginInput(chatId, callback.from.id, InputKind.CRON_TIME, now = now)
+            "event" to "add" -> state.beginInput(chatId, callback.from.id, InputKind.EVENT_TIME, now = now)
+            "event" to "delete" -> state.beginInput(chatId, callback.from.id, InputKind.EVENT_DELETE, now = now)
+            "jadwal" to "add" -> state.beginInput(chatId, callback.from.id, InputKind.JADWAL_DAY, now = now)
+            "jadwal" to "delete" -> state.beginInput(chatId, callback.from.id, InputKind.JADWAL_DELETE, now = now)
             "file" to "download" -> state.beginInput(chatId, callback.from.id, InputKind.DOWNLOAD_URL, now = now)
         }
         val text = when (scope to action) {
@@ -292,10 +342,28 @@ class TelegramMenuRouter(
             "media" to "volume" -> "🎵 Kirim volume (up, down, mute, unmute, max, atau 0–100)."
             "media" to "repeat", "media" to "shuffle", "media" to "custom" -> "🎵 Pilih mode/aksi dari pesan teks."
             "schedule" to "add", "schedule" to "remove", "schedule" to "reminder" -> "🗓️ Gunakan alur pesan terpandu untuk aksi ini."
+            "event" to "add" -> "📅 Kirim tanggal & jam event (contoh: 2026-08-17 15:30 atau 17-08-2026 15:30), atau /cancel."
+            "event" to "delete" -> "🗑️ Kirim nomor urut atau ID event yang ingin dihapus, atau /cancel."
+            "jadwal" to "add" -> "🎓 Kirim hari kuliah (contoh: Senin, Selasa, dst., atau angka 1-7), atau /cancel."
+            "jadwal" to "delete" -> "🗑️ Kirim nomor urut jadwal kuliah yang ingin dihapus, atau /cancel."
             "file" to "download" -> "📁 Kirim URL HTTPS untuk memulai download."
             else -> "Aksi belum tersedia."
         }
         return RouterResult.SendMessage(callback.id, chatId, text, TelegramKeyboard.render(MenuScreen.MAIN, MenuRenderState()))
+    }
+
+    private fun parseDayOfWeek(input: String): Int? {
+        val clean = input.trim().lowercase()
+        return when (clean) {
+            "1", "senin", "mon", "monday" -> 1
+            "2", "selasa", "tue", "tuesday" -> 2
+            "3", "rabu", "wed", "wednesday" -> 3
+            "4", "kamis", "thu", "thursday" -> 4
+            "5", "jumat", "jum'at", "fri", "friday" -> 5
+            "6", "sabtu", "sat", "saturday" -> 6
+            "7", "minggu", "ahad", "sun", "sunday" -> 7
+            else -> null
+        }
     }
 
     private fun allowRequest(owner: String, action: String, now: Long): Boolean {
@@ -326,6 +394,25 @@ class TelegramMenuRouter(
         when (value.last().lowercaseChar()) { 's' -> amount * 1000; 'm' -> amount * 60_000; 'h' -> amount * 3_600_000; else -> -1 }
     }.getOrDefault(-1)
 
+    private fun parseEventTime(input: String): Long {
+        val patterns = listOf(
+            "yyyy-MM-dd HH:mm",
+            "dd-MM-yyyy HH:mm",
+            "yyyy/MM/dd HH:mm",
+            "dd/MM/yyyy HH:mm"
+        )
+        for (pattern in patterns) {
+            try {
+                val sdf = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).apply {
+                    isLenient = false
+                }
+                val date = sdf.parse(input)
+                if (date != null) return date.time
+            } catch (_: Exception) {}
+        }
+        return -1L
+    }
+
     private fun validCronTime(value: String): Boolean {
         val parts = value.split(":")
         val hour = parts.getOrNull(0)?.toIntOrNull() ?: return false
@@ -335,12 +422,17 @@ class TelegramMenuRouter(
 
     private fun isAllowedCronCommand(value: String): Boolean {
         val clean = value.trim()
-        return clean == "/status" || clean == "/scan_wifi" || clean == "/camera" || clean == "/camera f" ||
-            (clean.startsWith("/echo ") && clean.length <= 500)
+        return clean == "/status" || clean == "/camera" || clean == "/camera f" ||
+            clean == "/events" || clean.startsWith("/jadwal") || (clean.startsWith("/echo ") && clean.length <= 500)
     }
 
     private fun answer(callback: TelegramCallbackQuery, text: String, alert: Boolean = false) = RouterResult.Answer(callback.id, text, alert)
     private fun edit(callback: TelegramCallbackQuery, chatId: String, messageId: Long, text: String, markup: TelegramReplyMarkup?) = RouterResult.EditMenu(callback.id, chatId, messageId, text, markup)
-    private fun screenTitle(screen: MenuScreen) = if (screen == MenuScreen.MAIN) mainText() else "SecondLink Remote Control • ${screen.name.lowercase().replaceFirstChar { it.uppercase() }}"
+    private fun screenTitle(screen: MenuScreen) = when (screen) {
+        MenuScreen.MAIN -> mainText()
+        MenuScreen.CLASS_SCHEDULE -> "🎓 Jadwal Kuliah"
+        MenuScreen.CLASS_SCHEDULE_DAYS -> "🔍 Pilih Hari Jadwal Kuliah"
+        else -> "SecondLink Remote Control • ${screen.name.lowercase().replaceFirstChar { it.uppercase() }}"
+    }
     private fun mainText() = "SecondLink Remote Control"
 }

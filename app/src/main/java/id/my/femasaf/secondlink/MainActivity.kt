@@ -17,12 +17,14 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -39,8 +41,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import id.my.femasaf.secondlink.ui.theme.SecondLinkTheme
 import java.text.SimpleDateFormat
@@ -49,7 +49,6 @@ import java.util.*
 class MainActivity : FragmentActivity() {
 
     private val viewModel: BotViewModel by viewModels()
-    private val isAuthenticated = mutableStateOf(false)
 
     private val requiredPermissions = mutableListOf(
         Manifest.permission.READ_CONTACTS,
@@ -70,7 +69,6 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         enableEdgeToEdge()
         
         BotManager.init(this)
@@ -78,53 +76,16 @@ class MainActivity : FragmentActivity() {
         
         setContent {
             SecondLinkTheme {
-                if (isAuthenticated.value) {
-                    DashboardScreen(
-                        viewModel = viewModel,
-                        onStopService = { stopBotService() },
-                        onStartService = { startBotService() },
-                        onExitApp = { exitFullApp() }
-                    )
-                } else {
-                    Surface(Modifier.fillMaxSize()) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Button(onClick = ::authenticateOwner) {
-                                Text("Buka dengan kunci perangkat")
-                            }
-                        }
-                    }
-                }
+                DashboardScreen(
+                    viewModel = viewModel,
+                    onStopService = { stopBotService() },
+                    onStartService = { startBotService() },
+                    onExitApp = { exitFullApp() }
+                )
             }
         }
 
-        authenticateOwner()
         checkAndRequestPermissions()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        isAuthenticated.value = false
-    }
-
-    private fun authenticateOwner() {
-        val allowed = BiometricManager.Authenticators.BIOMETRIC_STRONG or
-            BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        val prompt = BiometricPrompt(
-            this,
-            ContextCompat.getMainExecutor(this),
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    isAuthenticated.value = true
-                }
-            }
-        )
-        prompt.authenticate(
-            BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Verifikasi pemilik perangkat")
-                .setSubtitle("Autentikasi diperlukan untuk membuka dashboard")
-                .setAllowedAuthenticators(allowed)
-                .build()
-        )
     }
 
     private fun checkAndRequestPermissions() {
@@ -150,7 +111,7 @@ class MainActivity : FragmentActivity() {
             }
         }
         
-        if (Config.isBotEnabled(this) && Config.hasValidCredentials(this) && Config.hasAccessCode(this)) {
+        if (Config.isBotEnabled(this) && Config.hasValidCredentials(this)) {
             startBotService()
         } else {
             BotManager.setStatus("Disabled")
@@ -158,7 +119,7 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun startBotService() {
-        if (!Config.hasValidCredentials(this) || !Config.hasAccessCode(this)) {
+        if (!Config.hasValidCredentials(this)) {
             BotManager.setStatus("Configuration Required")
             return
         }
@@ -197,6 +158,8 @@ fun DashboardScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var showSettings by remember { mutableStateOf(false) }
+    var showAddEvent by remember { mutableStateOf(false) }
+    var showAddSchedule by remember { mutableStateOf(false) }
     var showDeviceHealth by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val isEnabled = uiState.stats.status != "Disabled" && uiState.stats.status != "Stopped"
@@ -256,6 +219,26 @@ fun DashboardScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             MediaAccessCard()
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            LocalFileServerCard(isEnabled)
+            
+            Spacer(modifier = Modifier.height(24.dp))
+
+            ClassScheduleCard(
+                schedules = uiState.classSchedules,
+                onAddSchedule = { showAddSchedule = true },
+                onDeleteSchedule = { viewModel.deleteClassSchedule(it) }
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            EventCalendarCard(
+                events = uiState.events,
+                onAddEvent = { showAddEvent = true },
+                onDeleteEvent = { viewModel.deleteEvent(it) }
+            )
             
             Spacer(modifier = Modifier.height(24.dp))
             
@@ -317,15 +300,36 @@ fun DashboardScreen(
     }
 
     if (showSettings) {
+        val serverPassword = remember { Config.getWebServerPassword(viewModel.getApplication()) }
         SettingsDialog(
             initialToken = uiState.botToken,
             initialChatId = uiState.chatId,
-            hasAccessCode = Config.hasAccessCode(viewModel.getApplication()),
+            initialWebServerPassword = serverPassword,
             onDismiss = { showSettings = false },
-            onSave = { token, chatId, accessCode ->
-                if (viewModel.updateConfig(token, chatId, accessCode)) {
+            onSave = { token, chatId, webServerPassword ->
+                if (viewModel.updateConfig(token, chatId, webServerPassword)) {
                     showSettings = false
                 }
+            }
+        )
+    }
+
+    if (showAddEvent) {
+        AddEventDialog(
+            onDismiss = { showAddEvent = false },
+            onSave = { title, desc, epoch ->
+                viewModel.addEvent(title, desc, epoch)
+                showAddEvent = false
+            }
+        )
+    }
+
+    if (showAddSchedule) {
+        AddClassScheduleDialog(
+            onDismiss = { showAddSchedule = false },
+            onSave = { day, start, end, sub, room, lec ->
+                viewModel.addClassSchedule(day, start, end, sub, room, lec)
+                showAddSchedule = false
             }
         )
     }
@@ -365,24 +369,93 @@ fun MediaAccessCard() {
     }
 }
 
+@Composable
+fun LocalFileServerCard(serviceEnabled: Boolean) {
+    val context = LocalContext.current
+    var webServerEnabled by remember { mutableStateOf(Config.isWebServerEnabled(context)) }
+    val address = remember(serviceEnabled, webServerEnabled) {
+        if (serviceEnabled && webServerEnabled) {
+            LocalFileServer.localIpv4Address()?.let { "http://$it:${LocalFileServer.DEFAULT_PORT}" }
+        } else null
+    }
+    val password = remember { Config.getWebServerPassword(context) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (serviceEnabled && webServerEnabled) Color(0xFFEAF2EC) else Color(0xFFF5F5F5)
+        ),
+        border = BorderStroke(1.dp, if (serviceEnabled && webServerEnabled) Color(0xFFA9C5B0) else Color(0xFFE0E0E0))
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("SecondLink Drive (Web Server)", fontWeight = FontWeight.Bold)
+                    Text(
+                        if (webServerEnabled && serviceEnabled) "🟢 Server Aktif" else "🔴 Server Nonaktif",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (webServerEnabled && serviceEnabled) Color(0xFF2E7D32) else Color.Gray
+                    )
+                }
+                Switch(
+                    checked = webServerEnabled,
+                    onCheckedChange = { isChecked ->
+                        webServerEnabled = isChecked
+                        Config.setWebServerEnabled(context, isChecked)
+                        val action = if (isChecked) "START_WEB_SERVER" else "STOP_WEB_SERVER"
+                        val intent = Intent(context, BotService::class.java).apply { this.action = action }
+                        if (serviceEnabled) {
+                            context.startService(intent)
+                        }
+                    }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                when {
+                    !serviceEnabled -> "Layanan bot tidak aktif. Jalankan bot service untuk mengaktifkan server."
+                    !webServerEnabled -> "Web server dimatikan. Aktifkan saklar di atas atau kirim /web on via bot Telegram."
+                    address == null -> "Hubungkan perangkat ke Wi-Fi untuk mendapatkan alamat server lokal."
+                    else -> "$address\nUsername: admin · Password: $password"
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
+            if (serviceEnabled && webServerEnabled && address != null) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = {
+                    contextStartUrlSafely(context, address)
+                }) { Text("Buka Drive") }
+            }
+        }
+    }
+}
+
+private fun contextStartUrlSafely(context: android.content.Context, url: String) {
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsDialog(
     initialToken: String,
     initialChatId: String,
-    hasAccessCode: Boolean,
+    initialWebServerPassword: String,
     onDismiss: () -> Unit,
     onSave: (String, String, String) -> Unit
 ) {
     var token by remember { mutableStateOf(initialToken) }
     var chatId by remember { mutableStateOf(initialChatId) }
-    var accessCode by remember { mutableStateOf("") }
+    var webServerPassword by remember { mutableStateOf(initialWebServerPassword) }
     val validCredentials = SecurityPolicy.isValidToken(token) && SecurityPolicy.isValidChatId(chatId)
-    val validAccessCode = hasAccessCode || SecurityPolicy.isStrongAccessCode(accessCode)
+    val validPassword = SecurityPolicy.isValidWebServerPassword(webServerPassword)
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Bot Configuration") },
+        title = { Text("Bot & Web Server Configuration") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -403,19 +476,18 @@ fun SettingsDialog(
                     isError = chatId.isNotEmpty() && !SecurityPolicy.isValidChatId(chatId)
                 )
                 OutlinedTextField(
-                    value = accessCode,
-                    onValueChange = { accessCode = it.take(64) },
-                    label = { Text(if (hasAccessCode) "Kode akses baru (opsional)" else "Kode akses command") },
+                    value = webServerPassword,
+                    onValueChange = { webServerPassword = it.take(64) },
+                    label = { Text("Password Web Server") },
                     supportingText = {
-                        Text("Minimal 8 karakter, huruf dan angka. Tambahkan #kode pada command sensitif.")
+                        Text("Password untuk login ke web server file drive (minimal 4 karakter).")
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                     singleLine = true,
-                    isError = accessCode.isNotEmpty() && !SecurityPolicy.isStrongAccessCode(accessCode)
+                    isError = webServerPassword.isNotEmpty() && !SecurityPolicy.isValidWebServerPassword(webServerPassword)
                 )
                 Text(
-                    "Restart bot service after saving to apply new token.",
+                    "Restart bot service after saving to apply new settings.",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color.Gray
                 )
@@ -423,8 +495,8 @@ fun SettingsDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = validCredentials && validAccessCode,
-                onClick = { onSave(token.trim(), chatId.trim(), accessCode) }
+                enabled = validCredentials && validPassword,
+                onClick = { onSave(token.trim(), chatId.trim(), webServerPassword.trim()) }
             ) {
                 Text("Save")
             }
@@ -644,4 +716,442 @@ fun ReminderCard(reminder: ReminderItem) {
             }
         }
     }
+}
+
+@Composable
+fun EventCalendarCard(
+    events: List<CalendarEventItem>,
+    onAddEvent: () -> Unit,
+    onDeleteEvent: (String) -> Unit
+) {
+    val sdf = remember { SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault()) }
+    val now = System.currentTimeMillis()
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, Color(0xFFE0E0E0)),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("📅 Event Calendar", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        color = Color(0xFFE3F2FD),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = "${events.count { !it.isNotified }} aktif",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF1565C0)
+                        )
+                    }
+                }
+                IconButton(onClick = onAddEvent) {
+                    Icon(Icons.Default.Add, contentDescription = "Tambah Event", tint = Color(0xFF1565C0))
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            if (events.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Belum ada event terjadwal", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    events.forEach { event ->
+                        val isPast = event.eventTime < now
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = if (event.isNotified) Color(0xFFF5F5F5) else if (isPast) Color(0xFFFFF3E0) else Color(0xFFF1F8E9),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, if (event.isNotified) Color(0xFFE0E0E0) else if (isPast) Color(0xFFFFB74D) else Color(0xFFC5E1A5))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        event.title,
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        "⏰ ${sdf.format(Date(event.eventTime))}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (isPast && !event.isNotified) Color(0xFFD84315) else Color(0xFF558B2F)
+                                    )
+                                    if (event.description.isNotBlank()) {
+                                        Text(
+                                            "📝 ${event.description}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color.DarkGray
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { onDeleteEvent(event.id) }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Hapus", tint = Color.Gray)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddEventDialog(
+    onDismiss: () -> Unit,
+    onSave: (title: String, description: String, epochMs: Long) -> Unit
+) {
+    val now = remember { Calendar.getInstance() }
+    val defaultDateStr = remember {
+        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        sdf.format(now.time)
+    }
+    val defaultTimeStr = remember {
+        val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+        sdf.format(now.time)
+    }
+
+    var dateStr by remember { mutableStateOf(defaultDateStr) }
+    var timeStr by remember { mutableStateOf(defaultTimeStr) }
+    var title by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+
+    val parsedEpoch = remember(dateStr, timeStr) {
+        val full = "$dateStr $timeStr"
+        val patterns = listOf("yyyy-MM-dd HH:mm", "dd-MM-yyyy HH:mm")
+        var res = -1L
+        for (p in patterns) {
+            try {
+                val sdf = SimpleDateFormat(p, Locale.getDefault()).apply { isLenient = false }
+                val d = sdf.parse(full)
+                if (d != null) { res = d.time; break }
+            } catch (_: Exception) {}
+        }
+        res
+    }
+
+    val isValid = title.isNotBlank() && parsedEpoch > 0L
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Tambah Event Kalender") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Judul Event") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("Catatan / Deskripsi (opsional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = dateStr,
+                        onValueChange = { dateStr = it },
+                        label = { Text("Tanggal (YYYY-MM-DD)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1.4f)
+                    )
+                    OutlinedTextField(
+                        value = timeStr,
+                        onValueChange = { timeStr = it },
+                        label = { Text("Jam (HH:mm)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (parsedEpoch <= 0L) {
+                    Text("Format tanggal atau jam tidak valid", color = Color.Red, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = isValid,
+                onClick = { onSave(title.trim(), description.trim(), parsedEpoch) }
+            ) {
+                Text("Simpan")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Batal") }
+        }
+    )
+}
+
+@Composable
+fun ClassScheduleCard(
+    schedules: List<ClassScheduleItem>,
+    onAddSchedule: () -> Unit,
+    onDeleteSchedule: (String) -> Unit
+) {
+    val dayNames = listOf("Semua", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+    var selectedDayIndex by remember { mutableStateOf(0) }
+
+    val filtered = if (selectedDayIndex == 0) {
+        schedules
+    } else {
+        schedules.filter { it.dayOfWeek == selectedDayIndex }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, Color(0xFFE0E0E0)),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🎓 Jadwal Kuliah", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        color = Color(0xFFEDE7F6),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = "${schedules.size} matkul",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF512DA8)
+                        )
+                    }
+                }
+                IconButton(onClick = onAddSchedule) {
+                    Icon(Icons.Default.Add, contentDescription = "Tambah Jadwal", tint = Color(0xFF512DA8))
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                dayNames.forEachIndexed { index, name ->
+                    val isSelected = selectedDayIndex == index
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { selectedDayIndex = index },
+                        label = { Text(name, fontSize = 12.sp) }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            if (filtered.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        if (selectedDayIndex == 0) "Belum ada jadwal kuliah yang diatur" else "Tidak ada jadwal kuliah di hari ${dayNames[selectedDayIndex]}",
+                        color = Color.Gray,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    filtered.forEach { s ->
+                        val dayLabel = dayNames.getOrElse(s.dayOfWeek) { "Hari ${s.dayOfWeek}" }
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = Color(0xFFF9F7FF),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, Color(0xFFD1C4E9))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Surface(
+                                            color = Color(0xFF673AB7),
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = dayLabel,
+                                                color = Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            "⏰ ${s.startTime} - ${s.endTime}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFF4527A0)
+                                        )
+                                    }
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        s.subject,
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        "📍 Ruang: ${s.room}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.DarkGray
+                                    )
+                                    if (s.lecturer.isNotBlank()) {
+                                        Text(
+                                            "👨‍🏫 Dosen: ${s.lecturer}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color.Gray
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { onDeleteSchedule(s.id) }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Hapus", tint = Color.Gray)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddClassScheduleDialog(
+    onDismiss: () -> Unit,
+    onSave: (dayOfWeek: Int, start: String, end: String, subject: String, room: String, lecturer: String) -> Unit
+) {
+    val dayNames = listOf("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+    var selectedDay by remember { mutableStateOf(1) }
+    var startTime by remember { mutableStateOf("08:00") }
+    var endTime by remember { mutableStateOf("10:30") }
+    var subject by remember { mutableStateOf("") }
+    var room by remember { mutableStateOf("") }
+    var lecturer by remember { mutableStateOf("") }
+
+    val isValid = subject.isNotBlank() && room.isNotBlank() && startTime.isNotBlank() && endTime.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Tambah Jadwal Kuliah") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Pilih Hari:", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    dayNames.forEachIndexed { idx, name ->
+                        val dayNum = idx + 1
+                        FilterChip(
+                            selected = selectedDay == dayNum,
+                            onClick = { selectedDay = dayNum },
+                            label = { Text(name, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = startTime,
+                        onValueChange = { startTime = it },
+                        label = { Text("Mulai (HH:mm)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = endTime,
+                        onValueChange = { endTime = it },
+                        label = { Text("Selesai (HH:mm)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                OutlinedTextField(
+                    value = subject,
+                    onValueChange = { subject = it },
+                    label = { Text("Nama Mata Kuliah") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = room,
+                    onValueChange = { room = it },
+                    label = { Text("Ruangan / Lab") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = lecturer,
+                    onValueChange = { lecturer = it },
+                    label = { Text("Dosen Pengampu (opsional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = isValid,
+                onClick = { onSave(selectedDay, startTime.trim(), endTime.trim(), subject.trim(), room.trim(), lecturer.trim()) }
+            ) {
+                Text("Simpan")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Batal") }
+        }
+    )
 }

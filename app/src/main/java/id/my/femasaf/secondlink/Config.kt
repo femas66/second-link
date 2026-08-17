@@ -9,8 +9,8 @@ object Config {
     private const val KEY_CHAT_ID = "telegram_chat_id"
     private const val KEY_LAST_UPDATE_ID = "last_telegram_update_id"
     private const val KEY_BOT_ENABLED = "bot_enabled"
-    private const val KEY_ACCESS_CODE_HASH = "access_code_hash"
-    private const val KEY_ACCESS_CODE_SALT = "access_code_salt"
+    private const val KEY_WEB_SERVER_ENABLED = "web_server_enabled"
+    private const val KEY_WEB_SERVER_PASSWORD = "web_server_password"
     private const val KEY_PREFERRED_MEDIA_PACKAGE = "preferred_media_package"
 
     private fun getPrefs(context: Context): SharedPreferences {
@@ -62,6 +62,27 @@ object Config {
             .apply()
     }
 
+    fun isWebServerEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_WEB_SERVER_ENABLED, true)
+    }
+
+    fun setWebServerEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit()
+            .putBoolean(KEY_WEB_SERVER_ENABLED, enabled)
+            .apply()
+    }
+
+    fun getWebServerPassword(context: Context): String {
+        return SecureStore(context).get(KEY_WEB_SERVER_PASSWORD).ifEmpty { "admin123" }
+    }
+
+    fun setWebServerPassword(context: Context, password: String): Boolean {
+        val clean = password.trim()
+        if (!SecurityPolicy.isValidWebServerPassword(clean)) return false
+        SecureStore(context).put(KEY_WEB_SERVER_PASSWORD, clean)
+        return true
+    }
+
     fun getPreferredMediaPackage(context: Context): String =
         getPrefs(context).getString(KEY_PREFERRED_MEDIA_PACKAGE, "").orEmpty()
 
@@ -73,33 +94,9 @@ object Config {
         SecurityPolicy.isValidToken(getToken(context)) &&
             SecurityPolicy.isValidChatId(getChatId(context))
 
-    fun setAccessCode(context: Context, code: String): Boolean {
-        if (!SecurityPolicy.isStrongAccessCode(code)) return false
-        val salt = ByteArray(16).also(java.security.SecureRandom()::nextBytes)
-        val hash = hashAccessCode(code, salt)
-        SecureStore(context).put(KEY_ACCESS_CODE_SALT, android.util.Base64.encodeToString(salt, android.util.Base64.NO_WRAP))
-        SecureStore(context).put(KEY_ACCESS_CODE_HASH, android.util.Base64.encodeToString(hash, android.util.Base64.NO_WRAP))
-        return true
-    }
-
-    fun hasAccessCode(context: Context): Boolean =
-        SecureStore(context).get(KEY_ACCESS_CODE_HASH).isNotEmpty()
-
-    fun verifyAccessCode(context: Context, candidate: String): Boolean {
-        val store = SecureStore(context)
-        val salt = runCatching {
-            android.util.Base64.decode(store.get(KEY_ACCESS_CODE_SALT), android.util.Base64.NO_WRAP)
-        }.getOrNull() ?: return false
-        val expected = runCatching {
-            android.util.Base64.decode(store.get(KEY_ACCESS_CODE_HASH), android.util.Base64.NO_WRAP)
-        }.getOrNull() ?: return false
-        return java.security.MessageDigest.isEqual(expected, hashAccessCode(candidate, salt))
-    }
-
-    private fun hashAccessCode(code: String, salt: ByteArray): ByteArray {
-        val spec = javax.crypto.spec.PBEKeySpec(code.toCharArray(), salt, 120_000, 256)
-        return javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            .generateSecret(spec).encoded.also { spec.clearPassword() }
+    fun verifyWebServerPassword(context: Context, candidate: String): Boolean {
+        val expected = getWebServerPassword(context)
+        return candidate.isNotEmpty() && candidate == expected
     }
 
     private fun migrateLegacySecrets(context: Context) {

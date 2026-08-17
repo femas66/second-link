@@ -35,7 +35,8 @@ interface TelegramApi {
     @GET("getUpdates")
     suspend fun getUpdates(
         @Query("offset") offset: Long?,
-        @Query("timeout") timeout: Int = 30
+        @Query("timeout") timeout: Int = 30,
+        @Query("allowed_updates") allowedUpdates: String = "[\"message\",\"callback_query\"]"
     ): Response<TelegramUpdateResponse>
 
     @Multipart

@@ -30,6 +30,27 @@ data class AuditLogEntity(
     val response: String? = null
 )
 
+@Entity(tableName = "calendar_events")
+data class EventEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val description: String = "",
+    val eventTime: Long,
+    val isNotified: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "class_schedules")
+data class ClassScheduleEntity(
+    @PrimaryKey val id: String,
+    val dayOfWeek: Int, // 1 = Senin, 2 = Selasa, 3 = Rabu, 4 = Kamis, 5 = Jumat, 6 = Sabtu, 7 = Minggu
+    val startTime: String, // "08:00"
+    val endTime: String, // "10:30"
+    val subject: String, // "Mata Kuliah"
+    val room: String, // "Ruangan"
+    val lecturer: String = "" // Dosen pengampu (opsional)
+)
+
 @Dao
 interface BotDao {
     @Query("SELECT * FROM reminders")
@@ -56,6 +77,45 @@ interface BotDao {
     @Query("DELETE FROM cronjobs WHERE id = :id")
     suspend fun deleteCronJob(id: String)
 
+    @Query("SELECT * FROM calendar_events ORDER BY eventTime ASC")
+    fun getAllEvents(): kotlinx.coroutines.flow.Flow<List<EventEntity>>
+
+    @Query("SELECT * FROM calendar_events ORDER BY eventTime ASC")
+    suspend fun getEventsList(): List<EventEntity>
+
+    @Query("SELECT * FROM calendar_events WHERE isNotified = 0 ORDER BY eventTime ASC")
+    suspend fun getPendingEvents(): List<EventEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEvent(event: EventEntity)
+
+    @Update
+    suspend fun updateEvent(event: EventEntity)
+
+    @Query("DELETE FROM calendar_events WHERE id = :id")
+    suspend fun deleteEvent(id: String)
+
+    @Query("UPDATE calendar_events SET isNotified = 1 WHERE id = :id")
+    suspend fun markEventNotified(id: String)
+
+    @Query("SELECT * FROM class_schedules ORDER BY dayOfWeek ASC, startTime ASC")
+    fun getAllClassSchedules(): kotlinx.coroutines.flow.Flow<List<ClassScheduleEntity>>
+
+    @Query("SELECT * FROM class_schedules ORDER BY dayOfWeek ASC, startTime ASC")
+    suspend fun getClassSchedulesList(): List<ClassScheduleEntity>
+
+    @Query("SELECT * FROM class_schedules WHERE dayOfWeek = :dayOfWeek ORDER BY startTime ASC")
+    suspend fun getClassSchedulesByDay(dayOfWeek: Int): List<ClassScheduleEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertClassSchedule(schedule: ClassScheduleEntity)
+
+    @Update
+    suspend fun updateClassSchedule(schedule: ClassScheduleEntity)
+
+    @Query("DELETE FROM class_schedules WHERE id = :id")
+    suspend fun deleteClassSchedule(id: String)
+
     @Insert
     suspend fun insertAuditLog(log: AuditLogEntity)
 
@@ -69,7 +129,7 @@ interface BotDao {
     suspend fun deleteAuditLogsOlderThan(cutoff: Long)
 }
 
-@Database(entities = [ReminderEntity::class, CronJobEntity::class, AuditLogEntity::class], version = 2)
+@Database(entities = [ReminderEntity::class, CronJobEntity::class, AuditLogEntity::class, EventEntity::class, ClassScheduleEntity::class], version = 4)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun botDao(): BotDao
 

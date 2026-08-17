@@ -14,10 +14,8 @@ object SecurityPolicy {
     fun isValidChatId(value: String): Boolean =
         chatIdPattern.matches(value.trim()) && value.trim() != "0"
 
-    fun isStrongAccessCode(value: String): Boolean =
-        value.length in 8..64 &&
-            value.any(Char::isLetter) &&
-            value.any(Char::isDigit)
+    fun isValidWebServerPassword(value: String): Boolean =
+        value.trim().length in 4..64
 
     fun commandName(text: String): String =
         text.trim().substringBefore(' ').take(40).lowercase(Locale.ROOT)

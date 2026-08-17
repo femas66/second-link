@@ -34,6 +34,24 @@ data class ReminderItem(
     val isDone: Boolean = false
 )
 
+data class CalendarEventItem(
+    val id: String,
+    val title: String,
+    val description: String = "",
+    val eventTime: Long,
+    val isNotified: Boolean = false
+)
+
+data class ClassScheduleItem(
+    val id: String,
+    val dayOfWeek: Int, // 1 = Senin .. 7 = Minggu
+    val startTime: String,
+    val endTime: String,
+    val subject: String,
+    val room: String,
+    val lecturer: String = ""
+)
+
 data class AuditLogItem(
     val command: String,
     val timestamp: Long,
@@ -43,6 +61,8 @@ data class AuditLogItem(
 data class DashboardUiState(
     val stats: BotStats = BotStats(),
     val reminders: List<ReminderItem> = emptyList(),
+    val events: List<CalendarEventItem> = emptyList(),
+    val classSchedules: List<ClassScheduleItem> = emptyList(),
     val cronJobs: List<CronJob> = emptyList(),
     val logs: List<AuditLogItem> = emptyList(),
     val botToken: String = "",
@@ -81,12 +101,36 @@ class BotViewModel(application: Application) : AndroidViewModel(application) {
             }
             _uiState.update { it.copy(reminders = reminders, cronJobs = cronJobs, logs = logs) }
         }
+        viewModelScope.launch {
+            dao.getAllEvents().collect { entities ->
+                val events = entities.map {
+                    CalendarEventItem(it.id, it.title, it.description, it.eventTime, it.isNotified)
+                }
+                _uiState.update { it.copy(events = events) }
+            }
+        }
+        viewModelScope.launch {
+            dao.getAllClassSchedules().collect { entities ->
+                val schedules = entities.map {
+                    ClassScheduleItem(
+                        it.id,
+                        it.dayOfWeek,
+                        it.startTime,
+                        it.endTime,
+                        it.subject,
+                        it.room,
+                        it.lecturer
+                    )
+                }
+                _uiState.update { it.copy(classSchedules = schedules) }
+            }
+        }
     }
 
-    fun updateConfig(token: String, chatId: String, accessCode: String): Boolean {
+    fun updateConfig(token: String, chatId: String, webServerPassword: String): Boolean {
         val oldToken = Config.getToken(getApplication())
         if (!Config.saveConfig(getApplication(), token, chatId)) return false
-        if (accessCode.isNotEmpty() && !Config.setAccessCode(getApplication(), accessCode)) return false
+        if (webServerPassword.isNotEmpty() && !Config.setWebServerPassword(getApplication(), webServerPassword)) return false
         _uiState.update { it.copy(botToken = token, chatId = chatId) }
         
         // Restart service if token changed
@@ -150,6 +194,24 @@ class BotViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeCronJob(id: String) {
         BotManager.removeCronJob(id)
+    }
+
+    fun addEvent(title: String, description: String, eventTime: Long) {
+        val id = java.util.UUID.randomUUID().toString()
+        BotManager.addEvent(id, title, description, eventTime)
+    }
+
+    fun deleteEvent(id: String) {
+        BotManager.deleteEvent(id)
+    }
+
+    fun addClassSchedule(dayOfWeek: Int, startTime: String, endTime: String, subject: String, room: String, lecturer: String = "") {
+        val id = java.util.UUID.randomUUID().toString()
+        BotManager.addClassSchedule(id, dayOfWeek, startTime, endTime, subject, room, lecturer)
+    }
+
+    fun deleteClassSchedule(id: String) {
+        BotManager.deleteClassSchedule(id)
     }
 
     fun refreshDeviceHealth() {

@@ -6,7 +6,7 @@ import org.junit.Test
 class TelegramMenuStateTest {
     @Test fun unlockExpiresAfterFiveMinutes() {
         var now = 1_000L
-        val state = TelegramMenuState { now }
+        val state = TelegramMenuState(clock = { now })
         state.unlock("chat", 7L)
         assertTrue(state.isUnlocked("chat", 7L))
         now += TelegramMenuState.SESSION_TTL_MS + 1
@@ -21,15 +21,15 @@ class TelegramMenuStateTest {
 
     @Test fun pendingInputIsBoundToOwnerAndExpires() {
         var now = 1_000L
-        val state = TelegramMenuState { now }
-        state.beginInput("chat", 7L, InputKind.ACCESS_CODE)
+        val state = TelegramMenuState(clock = { now })
+        state.beginInput("chat", 7L, InputKind.DOWNLOAD_URL)
         assertNull(state.consumeInput("chat", 8L))
         now += TelegramMenuState.SESSION_TTL_MS + 1
         assertNull(state.consumeInput("chat", 7L))
     }
 
     @Test fun callbackValuesAreShortAndDoNotContainSecrets() {
-        val callback = TelegramKeyboard.callback("security", "0123456789abcdef")
+        val callback = TelegramKeyboard.callback("web", "status", "0123456789abcdef")
         assertTrue(callback.length <= 64)
         assertFalse(callback.contains("https"))
         assertFalse(callback.contains("com.blok"))

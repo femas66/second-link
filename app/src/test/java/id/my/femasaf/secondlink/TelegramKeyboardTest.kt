@@ -7,7 +7,7 @@ import org.junit.Test
 class TelegramKeyboardTest {
     @Test fun everyMainMenuButtonUsesKnownAction() {
         val buttons = TelegramKeyboard.main().inlineKeyboard.flatten()
-        assertTrue(buttons.map { it.text }.containsAll(listOf("Status", "Media", "Kamera", "Perangkat", "Jadwal", "File", "Keamanan", "Tutup Menu")))
+        assertTrue(buttons.map { it.text }.containsAll(listOf("Status", "Doctor Izin", "Web Server", "🎓 Jadwal Kuliah", "📅 Kalender", "Media", "Kamera", "Perangkat", "Jadwal Rutin", "File", "Tutup Menu")))
         assertTrue(buttons.all { it.callbackData!!.startsWith("v1:") })
     }
 

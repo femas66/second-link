@@ -101,6 +101,57 @@ object BotManager {
         }
     }
 
+    var onEventScheduled: ((EventEntity) -> Unit)? = null
+
+    fun addEvent(id: String, title: String, description: String, eventTime: Long) {
+        val entity = EventEntity(id = id, title = title, description = description, eventTime = eventTime)
+        scope.launch {
+            database?.botDao()?.insertEvent(entity)
+            onEventScheduled?.invoke(entity)
+        }
+    }
+
+    fun deleteEvent(id: String) {
+        scope.launch {
+            database?.botDao()?.deleteEvent(id)
+        }
+    }
+
+    fun markEventNotified(id: String) {
+        scope.launch {
+            database?.botDao()?.markEventNotified(id)
+        }
+    }
+
+    suspend fun getPendingEvents(): List<EventEntity> {
+        return database?.botDao()?.getPendingEvents() ?: emptyList()
+    }
+
+    suspend fun getEventsList(): List<EventEntity> {
+        return database?.botDao()?.getEventsList() ?: emptyList()
+    }
+
+    fun addClassSchedule(id: String, dayOfWeek: Int, startTime: String, endTime: String, subject: String, room: String, lecturer: String = "") {
+        val entity = ClassScheduleEntity(id, dayOfWeek, startTime, endTime, subject, room, lecturer)
+        scope.launch {
+            database?.botDao()?.insertClassSchedule(entity)
+        }
+    }
+
+    fun deleteClassSchedule(id: String) {
+        scope.launch {
+            database?.botDao()?.deleteClassSchedule(id)
+        }
+    }
+
+    suspend fun getClassSchedulesList(): List<ClassScheduleEntity> {
+        return database?.botDao()?.getClassSchedulesList() ?: emptyList()
+    }
+
+    suspend fun getClassSchedulesByDay(dayOfWeek: Int): List<ClassScheduleEntity> {
+        return database?.botDao()?.getClassSchedulesByDay(dayOfWeek) ?: emptyList()
+    }
+
     suspend fun getPendingReminders(): List<ReminderEntity> {
         return database?.botDao()?.getPendingReminders() ?: emptyList()
     }
