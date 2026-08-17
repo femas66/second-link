@@ -155,4 +155,67 @@ object BotManager {
     suspend fun getPendingReminders(): List<ReminderEntity> {
         return database?.botDao()?.getPendingReminders() ?: emptyList()
     }
+
+    var pluginEngine: PluginEngine? = null
+
+    fun savePlugin(id: String, name: String, description: String, yamlContent: String, isEnabled: Boolean = true) {
+        val parsed = PluginParser.parse(yamlContent).getOrNull()
+        val triggerType = when (parsed?.trigger) {
+            is PluginTrigger.Interval -> "every"
+            is PluginTrigger.WifiConnected -> "wifi"
+            is PluginTrigger.BatteryChanged -> "battery"
+            is PluginTrigger.Schedule -> "schedule"
+            is PluginTrigger.TelegramCommand -> "command"
+            else -> "manual"
+        }
+        val entity = PluginEntity(
+            id = id,
+            name = name,
+            description = description,
+            yamlContent = yamlContent,
+            isEnabled = isEnabled,
+            triggerType = triggerType,
+            updatedAt = System.currentTimeMillis()
+        )
+        scope.launch {
+            database?.botDao()?.insertPlugin(entity)
+            pluginEngine?.onPluginUpdatedOrCreated(entity)
+        }
+    }
+
+    fun togglePlugin(id: String, isEnabled: Boolean) {
+        scope.launch {
+            val entity = database?.botDao()?.getPluginById(id) ?: return@launch
+            val updated = entity.copy(isEnabled = isEnabled, updatedAt = System.currentTimeMillis())
+            database?.botDao()?.updatePlugin(updated)
+            pluginEngine?.onPluginUpdatedOrCreated(updated)
+        }
+    }
+
+    fun deletePlugin(id: String) {
+        scope.launch {
+            database?.botDao()?.deletePlugin(id)
+            pluginEngine?.onPluginDeleted(id)
+        }
+    }
+
+    fun updatePluginStatus(id: String, lastRunTime: Long, lastStatus: String) {
+        scope.launch {
+            val entity = database?.botDao()?.getPluginById(id) ?: return@launch
+            val updated = entity.copy(lastRunTime = lastRunTime, lastStatus = lastStatus)
+            database?.botDao()?.updatePlugin(updated)
+        }
+    }
+
+    suspend fun getPluginsList(): List<PluginEntity> {
+        return database?.botDao()?.getPluginsList() ?: emptyList()
+    }
+
+    suspend fun getPluginById(id: String): PluginEntity? {
+        return database?.botDao()?.getPluginById(id)
+    }
+
+    suspend fun getPluginByName(name: String): PluginEntity? {
+        return database?.botDao()?.getPluginByName(name)
+    }
 }

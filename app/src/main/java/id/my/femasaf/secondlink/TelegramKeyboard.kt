@@ -18,16 +18,17 @@ object TelegramKeyboard {
 
     /** Flat actions are retained for compatibility with the first menu/router release. */
     val actions: Set<String> = setOf(
-        "menu", "main", "status", "doctor", "web", "media", "camera", "device", "schedule", "file", "event", "jadwal",
+        "menu", "main", "status", "doctor", "web", "media", "camera", "device", "schedule", "file", "event", "jadwal", "plugin", "plugins",
         "back", "close", "play", "pause"
     )
 
     /** Actions accepted after a scope (for example, `v1:media:next`). */
     val scopedActions: Map<String, Set<String>> = mapOf(
-        "menu" to setOf("main", "status", "doctor", "web", "media", "camera", "device", "schedule", "file", "event", "jadwal", "close"),
+        "menu" to setOf("main", "status", "doctor", "web", "media", "camera", "device", "schedule", "file", "event", "jadwal", "plugin", "close"),
         "web" to setOf("on", "off", "status", "back"),
         "event" to setOf("list", "add", "delete", "back"),
         "jadwal" to setOf("today", "tomorrow", "all", "days", "add", "delete", "day_1", "day_2", "day_3", "day_4", "day_5", "day_6", "day_7", "back"),
+        "plugin" to setOf("list", "add", "samples", "docs", "run", "delete", "back"),
         "media" to setOf(
             "status", "sessions", "list", "select", "play", "pause", "toggle", "next", "previous", "prev",
             "rewind", "fastforward", "ff", "seek_back", "seek_forward", "stop", "queue", "track", "search",
@@ -65,15 +66,24 @@ object TelegramKeyboard {
 
     fun render(screen: MenuScreen, state: MenuRenderState, nonce: String? = null): TelegramReplyMarkup = when (screen) {
         MenuScreen.MAIN -> rows(
-            button("Status", callback("status", nonce)), button("Media", callback("media", nonce)),
-            button("Doctor Izin", callback("doctor", nonce)), button("Web Server", callback("web", nonce)),
+            button("Status", callback("status", nonce)), button("Doctor Izin", callback("doctor", nonce)),
+            button("🧩 Plugin YAML", callback("plugin", nonce)), button("Web Server", callback("web", nonce)),
             button("🎓 Jadwal Kuliah", callback("jadwal", nonce)), button("📅 Kalender", callback("event", nonce)),
-            button("Jadwal Rutin", callback("schedule", nonce)), button("Kamera", callback("camera", nonce)),
-            button("Perangkat", callback("device", nonce)), button("File", callback("file", nonce)),
-            button("Tutup Menu", callback("close", nonce))
+            button("Media", callback("media", nonce)), button("Kamera", callback("camera", nonce)),
+            button("Perangkat", callback("device", nonce)), button("Jadwal Rutin", callback("schedule", nonce)),
+            button("File", callback("file", nonce)), button("Tutup Menu", callback("close", nonce))
         )
         MenuScreen.STATUS -> rows(
             button("Refresh", callback("status", nonce)), button("Kembali", callback("back", nonce))
+        )
+        MenuScreen.PLUGINS -> rows(
+            button("📋 Daftar Plugin", callback("plugin", "list", nonce)),
+            button("➕ Tambah Plugin", callback("plugin", "add", nonce)),
+            button("📖 Panduan Sintaks", callback("plugin", "docs", nonce)),
+            button("💡 Contoh Template", callback("plugin", "samples", nonce)),
+            button("▶️ Jalankan Plugin", callback("plugin", "run", nonce)),
+            button("🗑️ Hapus Plugin", callback("plugin", "delete", nonce)),
+            button("Kembali", callback("back", nonce))
         )
         MenuScreen.WEB -> rows(
             button("🌐 Info Server", callback("web", "status", nonce)),

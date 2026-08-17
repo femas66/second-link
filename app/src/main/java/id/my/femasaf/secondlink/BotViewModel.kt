@@ -52,6 +52,18 @@ data class ClassScheduleItem(
     val lecturer: String = ""
 )
 
+data class PluginItem(
+    val id: String,
+    val name: String,
+    val description: String,
+    val yamlContent: String,
+    val isEnabled: Boolean,
+    val lastRunTime: Long,
+    val lastStatus: String,
+    val triggerType: String,
+    val updatedAt: Long
+)
+
 data class AuditLogItem(
     val command: String,
     val timestamp: Long,
@@ -63,6 +75,7 @@ data class DashboardUiState(
     val reminders: List<ReminderItem> = emptyList(),
     val events: List<CalendarEventItem> = emptyList(),
     val classSchedules: List<ClassScheduleItem> = emptyList(),
+    val plugins: List<PluginItem> = emptyList(),
     val cronJobs: List<CronJob> = emptyList(),
     val logs: List<AuditLogItem> = emptyList(),
     val botToken: String = "",
@@ -123,6 +136,24 @@ class BotViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 _uiState.update { it.copy(classSchedules = schedules) }
+            }
+        }
+        viewModelScope.launch {
+            dao.getAllPlugins().collect { entities ->
+                val plugins = entities.map {
+                    PluginItem(
+                        it.id,
+                        it.name,
+                        it.description,
+                        it.yamlContent,
+                        it.isEnabled,
+                        it.lastRunTime,
+                        it.lastStatus,
+                        it.triggerType,
+                        it.updatedAt
+                    )
+                }
+                _uiState.update { it.copy(plugins = plugins) }
             }
         }
     }
@@ -212,6 +243,33 @@ class BotViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteClassSchedule(id: String) {
         BotManager.deleteClassSchedule(id)
+    }
+
+    fun savePlugin(id: String?, yamlContent: String): Result<String> {
+        val parseResult = PluginParser.parse(yamlContent)
+        if (parseResult.isFailure) {
+            return Result.failure(parseResult.exceptionOrNull() ?: IllegalArgumentException("Invalid YAML"))
+        }
+        val parsed = parseResult.getOrThrow()
+        val pluginId = id ?: java.util.UUID.randomUUID().toString()
+        BotManager.savePlugin(pluginId, parsed.name, parsed.description, yamlContent, isEnabled = true)
+        return Result.success(pluginId)
+    }
+
+    fun togglePlugin(id: String, isEnabled: Boolean) {
+        BotManager.togglePlugin(id, isEnabled)
+    }
+
+    fun deletePlugin(id: String) {
+        BotManager.deletePlugin(id)
+    }
+
+    fun runPlugin(id: String) {
+        viewModelScope.launch {
+            val entity = BotManager.getPluginById(id) ?: return@launch
+            val parsed = PluginParser.parse(entity.yamlContent).getOrNull() ?: return@launch
+            BotManager.pluginEngine?.executePlugin(entity.id, parsed, forceRun = true)
+        }
     }
 
     fun refreshDeviceHealth() {

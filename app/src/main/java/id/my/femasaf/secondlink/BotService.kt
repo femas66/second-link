@@ -65,6 +65,7 @@ class BotService : LifecycleService() {
     private val menuState = TelegramMenuState()
     private lateinit var menuRouter: TelegramMenuRouter
     private var fileServer: LocalFileServer? = null
+    private lateinit var pluginEngine: PluginEngine
 
     // Battery & Power Monitoring
     private var lastBatteryLevel: Int = -1
@@ -115,6 +116,36 @@ class BotService : LifecycleService() {
         BotManager.onEventScheduled = { event -> scheduleEvent(event) }
         recoverReminders()
         recoverEvents()
+
+        pluginEngine = PluginEngine(
+            context = this,
+            scope = lifecycleScope,
+            onSendTelegramMessage = { msg ->
+                val cid = Config.getChatId(this@BotService)
+                if (cid.isNotBlank()) sendTextMessage(msg, cid)
+            },
+            onSendLocalNotification = { title, body ->
+                showLocalNotification(title, body)
+            },
+            onExecuteBotCommand = { cmd ->
+                val cid = Config.getChatId(this@BotService)
+                dispatchMenuCommand(cmd, cid, 0L).message ?: "OK"
+            },
+            onWebServerAction = { action ->
+                when (action) {
+                    "start", "on" -> {
+                        Config.setWebServerEnabled(this@BotService, true)
+                        startFileServer()
+                    }
+                    "stop", "off" -> {
+                        Config.setWebServerEnabled(this@BotService, false)
+                        stopFileServer()
+                    }
+                }
+            }
+        )
+        BotManager.pluginEngine = pluginEngine
+        pluginEngine.start()
 
         // Register battery monitoring
         val filter = IntentFilter().apply {
@@ -439,6 +470,17 @@ class BotService : LifecycleService() {
                         text == "/jadwal" || text.startsWith("/jadwal ") || text == "/kuliah" || text.startsWith("/kuliah ") -> handleClassScheduleCommand(text, chatId)
                         text.startsWith("/jadwal_add ") -> handleClassScheduleAdd(text, chatId)
                         text.startsWith("/jadwal_delete ") || text.startsWith("/jadwal_del ") -> handleClassScheduleDelete(text, chatId)
+                        text == "/plugins" || text == "/plugin" || text == "/plugin_list" -> handlePluginList(chatId)
+                        text == "/plugin_docs" || text == "/plugin_syntax" || text == "/plugin_help" -> handlePluginDocs(chatId)
+                        text == "/plugin_samples" || text == "/plugin_templates" -> handlePluginSamples(chatId)
+                        text == "/plugin_reload" || text == "/plugin_refresh" -> handlePluginReload(chatId)
+                        text.startsWith("/plugin_add ") || text == "/plugin_add" -> handlePluginAdd(text, chatId)
+                        text.startsWith("/plugin_view ") -> handlePluginView(text, chatId)
+                        text.startsWith("/plugin_edit ") -> handlePluginEdit(text, chatId)
+                        text.startsWith("/plugin_toggle ") || text.startsWith("/plugin_switch ") -> handlePluginToggle(text, chatId)
+                        text.startsWith("/plugin_run ") -> handlePluginRun(text, chatId)
+                        text.startsWith("/plugin_delete ") || text.startsWith("/plugin_del ") -> handlePluginDelete(text, chatId)
+                        text.startsWith("name:") && (text.contains("trigger:") || text.contains("actions:")) -> handlePluginAdd(text, chatId)
                         text.startsWith("/download ") -> handleDownload(text.substringAfter("/download").trim(), chatId)
                         text.startsWith("/echo ") -> sendTextMessage(text.substringAfter("/echo").take(1000), chatId)
                         text.startsWith("/cron_add ") -> handleCronAdd(text, chatId)
@@ -467,8 +509,8 @@ class BotService : LifecycleService() {
                     BotManager.audit(chatId, SecurityPolicy.redactCommand(text), if (recognized) "SUCCESS" else "UNKNOWN")
                 } catch (e: Exception) {
                     Log.e("BotService", "Command failed", e)
-                    sendTextMessage("❌ Perintah gagal diproses.", chatId)
-                    BotManager.audit(chatId, SecurityPolicy.redactCommand(text), "FAILED")
+                    sendTextMessage("❌ Terjadi kesalahan saat memproses perintah.", chatId)
+                    BotManager.audit(chatId, SecurityPolicy.redactCommand(text), "FAILED", e.message)
                 }
             }
         }
@@ -591,6 +633,34 @@ class BotService : LifecycleService() {
                     handleClassScheduleDelete(command, chatId)
                     CommandResult("Hapus jadwal kuliah diproses.")
                 }
+                command == "/plugins" || command == "/plugin" || command == "/plugin_list" -> {
+                    handlePluginList(chatId)
+                    CommandResult("Daftar plugin ditampilkan.")
+                }
+                command == "/plugin_docs" || command == "/plugin_syntax" || command == "/plugin_help" -> {
+                    handlePluginDocs(chatId)
+                    CommandResult("Panduan sintaks plugin ditampilkan.")
+                }
+                command == "/plugin_reload" || command == "/plugin_refresh" -> {
+                    handlePluginReload(chatId)
+                    CommandResult("Hot-reload plugin berhasil.")
+                }
+                command == "/plugin_samples" || command == "/plugin_templates" -> {
+                    handlePluginSamples(chatId)
+                    CommandResult("Template plugin ditampilkan.")
+                }
+                command.startsWith("/plugin_add ") || command == "/plugin_add" -> {
+                    handlePluginAdd(command, chatId)
+                    CommandResult("Tambah plugin diproses.")
+                }
+                command.startsWith("/plugin_run ") -> {
+                    handlePluginRun(command, chatId)
+                    CommandResult("Jalankan plugin diproses.")
+                }
+                command.startsWith("/plugin_delete ") || command.startsWith("/plugin_del ") -> {
+                    handlePluginDelete(command, chatId)
+                    CommandResult("Hapus plugin diproses.")
+                }
                 command.startsWith("/media ") -> {
                     handleMediaCommand(command, chatId)
                     CommandResult("Kontrol media diproses.")
@@ -622,26 +692,26 @@ class BotService : LifecycleService() {
     private suspend fun sendHelp(chatId: String) {
         sendTextMessage(
             """
-                🤖 *Daftar Perintah*
-                /status — diagnostik HP
+                🤖 *Daftar Perintah SecondLink*
+                /status — diagnostik HP & baterai
                 /doctor — cek izin yang aktif/nonaktif
-                /web — info server file lokal
-                /web on — hidupkan server file lokal
-                /web off — matikan server file lokal
-                /jadwal [hari/all/besok] — lihat jadwal kuliah
-                /jadwal_add <hari> <jam> <matkul> — tambah jadwal kuliah
-                /jadwal_delete <id/nomor> — hapus jadwal kuliah
+                /web [on/off] — server file lokal
+                /plugins — daftar plugin otomatisasi YAML
+                /plugin_docs — panduan lengkap sintaks YAML
+                /plugin_add <yaml> — tambah plugin baru
+                /plugin_run <nama> — jalankan plugin langsung
+                /plugin_samples — lihat contoh template plugin
+                /jadwal [hari/all/besok] — jadwal kuliah
+                /jadwal_add <hari> <jam> <matkul> — tambah kuliah
+                /jadwal_delete <id/nomor> — hapus jadwal
                 /events — lihat kalender event
-                /event_add <YYYY-MM-DD HH:mm> <judul> — tambah event baru
+                /event_add <YYYY-MM-DD HH:mm> <judul> — event baru
                 /event_delete <id/nomor> — hapus event
-                /camera [f] — ambil foto (f = kamera depan)
+                /camera [f] — ambil foto HP
                 /list_contact — ambil kontak telepon
                 /download <https-url> — download file ke HP
-                /find — nyalakan alarm HP
-                /stop — matikan alarm HP
-                /cron_add <HH:mm> <cmd> — jadwal rutin harian
-                /cron_list — daftar jadwal rutin
-                /cron_stop <id> — hapus jadwal rutin
+                /find / /stop — alarm pencarian HP
+                /cron_add / /cron_list — jadwal rutin
                 /remind <waktu> <pesan> — buat pengingat
                 /media <aksi> — kontrol pemutar media
                 /help — bantuan perintah
@@ -1298,6 +1368,373 @@ class BotService : LifecycleService() {
         }
     }
 
+    private suspend fun handlePluginList(chatId: String) {
+        val plugins = BotManager.getPluginsList()
+        if (plugins.isEmpty()) {
+            sendTextMessage(
+                """
+                🧩 *Belum Ada Plugin Dynamic Automation.*
+                
+                Anda dapat menambahkan plugin YAML baru tanpa perlu update aplikasi!
+                
+                • Gunakan perintah: `/plugin_add <kode_yaml>`
+                • Lihat contoh: `/plugin_samples`
+                • Atau buka menu *🧩 Plugin YAML*
+                """.trimIndent(),
+                chatId
+            )
+            return
+        }
+
+        val sb = StringBuilder()
+        sb.append("🧩 *DAFTAR PLUGIN SECONDLINK*\n\n")
+        val sdf = SimpleDateFormat("dd MMM HH:mm", Locale.getDefault())
+
+        plugins.forEachIndexed { index, p ->
+            val statusIcon = if (p.isEnabled) "🟢 [AKTIF]" else "⚪ [NONAKTIF]"
+            val lastRunStr = if (p.lastRunTime > 0) sdf.format(Date(p.lastRunTime)) else "Belum pernah"
+            sb.append("${index + 1}. $statusIcon *${p.name}*\n")
+            if (p.description.isNotBlank()) sb.append("   📝 ${p.description}\n")
+            sb.append("   🎯 Trigger: `${p.triggerType}`\n")
+            sb.append("   ⏱️ Terakhir: $lastRunStr\n")
+            sb.append("   📊 Status: _${p.lastStatus}_\n")
+            sb.append("   ⚙️ Aksi: `/plugin_view ${p.name}` | `/plugin_run ${p.name}` | `/plugin_toggle ${p.name}`\n\n")
+        }
+        sb.append("• Panduan sintaks: `/plugin_docs`\n• Rekomendasi template: `/plugin_samples`")
+        sendTextMessage(sb.toString().trim(), chatId)
+    }
+
+    private suspend fun handlePluginDocs(chatId: String) {
+        val docs = """
+📖 *PANDUAN LENGKAP SINTAKS PLUGIN YAML*
+
+Struktur dasar plugin terdiri dari 4 bagian: `name`, `trigger`, `conditions` (opsional), dan `actions`.
+
+━━━━━━━━━━━━━━━━━━━━
+🎯 *1. TRIGGER (Pemicu)*
+• *Interval Berkala:*
+  `trigger:`
+  `  every: 5m` (pilihan: 30s, 1m, 5m, 15m, 1h)
+• *Koneksi Wi-Fi:*
+  `trigger:`
+  `  type: wifi_connected`
+  `  ssid: "Rumah"` (opsional)
+• *Status Baterai:*
+  `trigger:`
+  `  type: battery_changed`
+  `  mode: low` (pilihan: low, charging, full)
+• *Jadwal Jam Tertentu:*
+  `trigger:`
+  `  type: schedule`
+  `  at: "07:30"`
+  `  days: [1, 2, 3, 4, 5]` (1=Senin ... 7=Minggu)
+• *Perintah Kustom Bot:*
+  `trigger:`
+  `  type: command`
+  `  command: "/mycustom"`
+
+━━━━━━━━━━━━━━━━━━━━
+🔍 *2. CONDITIONS (Syarat Eksekusi)*
+_Aksi hanya berjalan jika semua syarat terpenuhi:_
+• `battery_above: 30` (baterai > 30%)
+• `battery_below: 20` (baterai < 20%)
+• `is_charging: true` / `false`
+• `wifi_ssid: "NamaSSID"`
+• `time_between: "22:00 - 06:00"`
+• `day_is: [1, 2, 3, 4, 5]`
+• `http_unreachable:`
+  `  url: http://localhost:8000`
+• `http_reachable:`
+  `  url: https://google.com`
+• `file_exists: "/storage/emulated/0/DCIM"`
+
+━━━━━━━━━━━━━━━━━━━━
+⚙️ *3. ACTIONS (Daftar Aksi)*
+Bisa menyusun beberapa aksi berurutan:
+• *Pesan Telegram:*
+  `- telegram:`
+  `    message: "Baterai: {{battery_level}}%"`
+• *Notifikasi Lokal HP:*
+  `- notification:`
+  `    title: "SecondLink Alert"`
+  `    message: "Server restart pada {{time}}"`
+• *Perintah Bot Internal:*
+  `- command: "/web on"` (atau /camera, /status, /find, dll)
+• *HTTP Request / Webhook:*
+  `- http_request:`
+  `    method: POST`
+  `    url: https://api.myhome.id/notify`
+  `    headers:`
+  `      Content-Type: application/json`
+  `    body: '{"battery": {{battery_level}}}'`
+• *Sinkronisasi Folder:*
+  `- sync:`
+  `    source: /storage/emulated/0/DCIM`
+  `    destination: nas://photos`
+• *Web Server Lokal:*
+  `- web_server: start` (atau stop)
+• *Media Player:*
+  `- media:`
+  `    action: pause` (play, next, prev, volume_down)
+
+━━━━━━━━━━━━━━━━━━━━
+✨ *4. VARIABEL TEMPLATE DINAMIS*
+Gunakan di pesan atau request body:
+• `{{battery_level}}` : Persentase baterai HP
+• `{{is_charging}}` : true / false
+• `{{wifi_ssid}}` : Nama Wi-Fi aktif
+• `{{time}}` : Jam saat ini (HH:mm:ss)
+• `{{date}}` : Tanggal saat ini (YYYY-MM-DD)
+• `{{plugin_name}}` : Nama plugin
+• `{{response_body}}` : Balasan dari HTTP request
+• `{{response_code}}` : HTTP status code (misal: 200)
+
+_Ketik /plugin_samples untuk melihat contoh siap pakai._
+        """.trimIndent()
+        sendTextMessage(docs, chatId)
+    }
+
+    private suspend fun handlePluginReload(chatId: String) {
+        pluginEngine.refreshAllIntervalPlugins()
+        val plugins = BotManager.getPluginsList()
+        val activeCount = plugins.count { it.isEnabled }
+        sendTextMessage("🔄 *Hot-Reload Berhasil!*\n${activeCount} dari ${plugins.size} plugin aktif telah dimuat ulang di runtime background.", chatId)
+    }
+
+    private suspend fun handlePluginView(text: String, chatId: String) {
+        val target = text.removePrefix("/plugin_view").trim()
+        if (target.isEmpty()) {
+            sendTextMessage("❌ Format: `/plugin_view <nama atau id plugin>`", chatId)
+            return
+        }
+        val plugins = BotManager.getPluginsList()
+        val index = target.toIntOrNull()
+        val plugin = if (index != null && index in 1..plugins.size) {
+            plugins[index - 1]
+        } else {
+            plugins.find { it.name.equals(target, ignoreCase = true) || it.id.equals(target, ignoreCase = true) || it.name.startsWith(target, ignoreCase = true) }
+        }
+
+        if (plugin == null) {
+            sendTextMessage("❌ Plugin *$target* tidak ditemukan.", chatId)
+            return
+        }
+
+        val statusStr = if (plugin.isEnabled) "🟢 AKTIF" else "⚪ NONAKTIF"
+        val msg = "🧩 *Plugin: ${plugin.name}* ($statusStr)\n\n```yaml\n${plugin.yamlContent}\n```\n\n• Jalankan: `/plugin_run ${plugin.name}`\n• Switch: `/plugin_toggle ${plugin.name}`\n• Hapus: `/plugin_delete ${plugin.name}`"
+        sendTextMessage(msg, chatId)
+    }
+
+    private suspend fun handlePluginAdd(text: String, chatId: String) {
+        val rawYaml = if (text.startsWith("/plugin_add")) {
+            text.removePrefix("/plugin_add").trim()
+        } else {
+            text.trim()
+        }
+
+        if (rawYaml.isEmpty()) {
+            sendTextMessage(
+                """
+                ❌ *Format:*
+                `/plugin_add <kode_yaml>`
+                
+                _Atau cukup tempel/kirim kode YAML langsung ke chat._
+                Ketik `/plugin_samples` untuk melihat contoh template.
+                """.trimIndent(),
+                chatId
+            )
+            return
+        }
+
+        val cleanYaml = rawYaml
+            .removePrefix("```yaml")
+            .removePrefix("```yml")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+
+        val parseResult = PluginParser.parse(cleanYaml)
+        if (parseResult.isFailure) {
+            val err = parseResult.exceptionOrNull()?.message ?: "Format YAML tidak valid"
+            sendTextMessage("❌ *Gagal Menyimpan Plugin:*\n$err", chatId)
+            return
+        }
+
+        val parsed = parseResult.getOrThrow()
+        val existing = BotManager.getPluginByName(parsed.name)
+        val id = existing?.id ?: UUID.randomUUID().toString()
+
+        BotManager.savePlugin(id, parsed.name, parsed.description, cleanYaml, isEnabled = true)
+
+        val triggerDesc = when (parsed.trigger) {
+            is PluginTrigger.Interval -> "Interval setiap ${parsed.trigger.raw}"
+            is PluginTrigger.WifiConnected -> "Koneksi Wi-Fi ${parsed.trigger.ssid ?: "(Semua)"}"
+            is PluginTrigger.BatteryChanged -> "Baterai ${parsed.trigger.mode}"
+            is PluginTrigger.Schedule -> "Jadwal harian ${parsed.trigger.at}"
+            is PluginTrigger.TelegramCommand -> "Perintah telegram '${parsed.trigger.commandName}'"
+            PluginTrigger.Manual -> "Manual trigger"
+        }
+
+        sendTextMessage(
+            """
+            ✅ *Plugin '${parsed.name}' Berhasil Disimpan & Diaktifkan!*
+            
+            📝 *Deskripsi:* ${if (parsed.description.isNotBlank()) parsed.description else "-"}
+            🎯 *Trigger:* $triggerDesc
+            ⚙️ *Aksi Terdaftar:* ${parsed.actions.size} aksi
+            
+            Gunakan `/plugin_run ${parsed.name}` untuk mengujinya langsung.
+            """.trimIndent(),
+            chatId
+        )
+    }
+
+    private suspend fun handlePluginEdit(text: String, chatId: String) {
+        val raw = text.removePrefix("/plugin_edit").trim()
+        val parts = raw.split(" ", limit = 2)
+        if (parts.size < 2) {
+            sendTextMessage("❌ Format: `/plugin_edit <nama_plugin> <yaml_baru>`", chatId)
+            return
+        }
+        val targetName = parts[0].trim()
+        val newYaml = parts[1].trim().removePrefix("```yaml").removePrefix("```yml").removePrefix("```").removeSuffix("```").trim()
+
+        val existing = BotManager.getPluginByName(targetName)
+        if (existing == null) {
+            sendTextMessage("❌ Plugin *$targetName* tidak ditemukan.", chatId)
+            return
+        }
+
+        val parseResult = PluginParser.parse(newYaml)
+        if (parseResult.isFailure) {
+            sendTextMessage("❌ *Gagal Update Plugin:*\n${parseResult.exceptionOrNull()?.message}", chatId)
+            return
+        }
+        val parsed = parseResult.getOrThrow()
+        BotManager.savePlugin(existing.id, parsed.name, parsed.description, newYaml, isEnabled = existing.isEnabled)
+        sendTextMessage("✅ *Plugin '${parsed.name}' berhasil diperbarui!*", chatId)
+    }
+
+    private suspend fun handlePluginToggle(text: String, chatId: String) {
+        val target = text.removePrefix("/plugin_toggle").removePrefix("/plugin_switch").trim()
+        if (target.isEmpty()) {
+            sendTextMessage("❌ Format: `/plugin_toggle <nama atau id plugin>`", chatId)
+            return
+        }
+        val plugins = BotManager.getPluginsList()
+        val index = target.toIntOrNull()
+        val plugin = if (index != null && index in 1..plugins.size) {
+            plugins[index - 1]
+        } else {
+            plugins.find { it.name.equals(target, ignoreCase = true) || it.id.equals(target, ignoreCase = true) }
+        }
+
+        if (plugin == null) {
+            sendTextMessage("❌ Plugin *$target* tidak ditemukan.", chatId)
+            return
+        }
+
+        val newStatus = !plugin.isEnabled
+        BotManager.togglePlugin(plugin.id, newStatus)
+        val statusText = if (newStatus) "🟢 *DIAKTIFKAN*" else "⚪ *DINONAKTIFKAN*"
+        sendTextMessage("Plugin *${plugin.name}* sekarang $statusText.", chatId)
+    }
+
+    private suspend fun handlePluginRun(text: String, chatId: String) {
+        val target = text.removePrefix("/plugin_run").trim()
+        if (target.isEmpty()) {
+            sendTextMessage("❌ Format: `/plugin_run <nama atau id plugin>`", chatId)
+            return
+        }
+        val plugins = BotManager.getPluginsList()
+        val index = target.toIntOrNull()
+        val plugin = if (index != null && index in 1..plugins.size) {
+            plugins[index - 1]
+        } else {
+            plugins.find { it.name.equals(target, ignoreCase = true) || it.id.equals(target, ignoreCase = true) }
+        }
+
+        if (plugin == null) {
+            sendTextMessage("❌ Plugin *$target* tidak ditemukan.", chatId)
+            return
+        }
+
+        val parsed = PluginParser.parse(plugin.yamlContent).getOrNull()
+        if (parsed == null) {
+            sendTextMessage("❌ Gagal membaca konten YAML plugin *${plugin.name}*.", chatId)
+            return
+        }
+
+        sendTextMessage("⏳ Menjalankan plugin *${plugin.name}*...", chatId)
+        val result = pluginEngine.executePlugin(plugin.id, parsed, triggerContext = mapOf("trigger" to "manual"), forceRun = true)
+        if (result.success) {
+            sendTextMessage("✅ *Eksekusi Plugin '${plugin.name}' Selesai!*\n${result.message}", chatId)
+        } else {
+            sendTextMessage("❌ *Eksekusi Plugin '${plugin.name}' Gagal:*\n${result.error ?: result.message}", chatId)
+        }
+    }
+
+    private suspend fun handlePluginDelete(text: String, chatId: String) {
+        val target = text.removePrefix("/plugin_delete").removePrefix("/plugin_del").trim()
+        if (target.isEmpty()) {
+            sendTextMessage("❌ Format: `/plugin_delete <nama atau id plugin>`", chatId)
+            return
+        }
+        val plugins = BotManager.getPluginsList()
+        val index = target.toIntOrNull()
+        val plugin = if (index != null && index in 1..plugins.size) {
+            plugins[index - 1]
+        } else {
+            plugins.find { it.name.equals(target, ignoreCase = true) || it.id.equals(target, ignoreCase = true) }
+        }
+
+        if (plugin == null) {
+            sendTextMessage("❌ Plugin *$target* tidak ditemukan.", chatId)
+            return
+        }
+
+        BotManager.deletePlugin(plugin.id)
+        sendTextMessage("🗑️ Plugin *${plugin.name}* berhasil dihapus.", chatId)
+    }
+
+    private suspend fun handlePluginSamples(chatId: String) {
+        val sb = StringBuilder()
+        sb.append("💡 *REKOMENDASI TEMPLATE PLUGIN YAML*\n\n")
+        sb.append("_Salin template di bawah dan sesuaikan nilainya, lalu kirim dengan perintah `/plugin_add <yaml>` atau tempel langsung ke chat:_\n\n")
+
+        PluginCatalog.templates.forEachIndexed { i, t ->
+            sb.append("${i + 1}. ${t.icon} *${t.name}* (${t.category})\n")
+            sb.append("📝 _${t.description}_\n")
+            sb.append("```yaml\n${t.yamlContent}\n```\n\n")
+        }
+
+        sendTextMessage(sb.toString().trim(), chatId)
+    }
+
+    private fun showLocalNotification(title: String, message: String) {
+        val channelId = "secondlink_plugins"
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "SecondLink Plugin Notifications",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifikasi dari eksekusi plugin otomatisasi"
+                enableVibration(true)
+            }
+            manager.createNotificationChannel(channel)
+        }
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        manager.notify((System.currentTimeMillis() % 100000).toInt() + 200, notification)
+    }
+
     private suspend fun handleDownload(url: String, targetChatId: String) {
         if (url.isEmpty()) {
             sendTextMessage("❌ Masukkan URL.", targetChatId)
@@ -1392,6 +1829,7 @@ class BotService : LifecycleService() {
 
     override fun onDestroy() {
         pollingJob?.cancel()
+        if (::pluginEngine.isInitialized) pluginEngine.stop()
         fileServer?.stop()
         fileServer = null
         try { unregisterReceiver(batteryReceiver) } catch (e: Exception) {}
@@ -1404,6 +1842,8 @@ class BotService : LifecycleService() {
         return clean == "/status" ||
             clean == "/events" ||
             clean.startsWith("/jadwal") ||
+            clean == "/plugins" ||
+            clean.startsWith("/plugin_run") ||
             clean == "/camera" ||
             clean == "/camera f" ||
             (clean.startsWith("/echo ") && clean.length <= 500)

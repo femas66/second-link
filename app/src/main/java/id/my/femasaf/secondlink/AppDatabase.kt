@@ -51,6 +51,20 @@ data class ClassScheduleEntity(
     val lecturer: String = "" // Dosen pengampu (opsional)
 )
 
+@Entity(tableName = "plugins")
+data class PluginEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val description: String = "",
+    val yamlContent: String,
+    val isEnabled: Boolean = true,
+    val lastRunTime: Long = 0L,
+    val lastStatus: String = "Belum pernah dijalankan",
+    val triggerType: String = "manual",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
 @Dao
 interface BotDao {
     @Query("SELECT * FROM reminders")
@@ -116,6 +130,27 @@ interface BotDao {
     @Query("DELETE FROM class_schedules WHERE id = :id")
     suspend fun deleteClassSchedule(id: String)
 
+    @Query("SELECT * FROM plugins ORDER BY updatedAt DESC")
+    fun getAllPlugins(): kotlinx.coroutines.flow.Flow<List<PluginEntity>>
+
+    @Query("SELECT * FROM plugins ORDER BY updatedAt DESC")
+    suspend fun getPluginsList(): List<PluginEntity>
+
+    @Query("SELECT * FROM plugins WHERE id = :id LIMIT 1")
+    suspend fun getPluginById(id: String): PluginEntity?
+
+    @Query("SELECT * FROM plugins WHERE LOWER(name) = LOWER(:name) LIMIT 1")
+    suspend fun getPluginByName(name: String): PluginEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlugin(plugin: PluginEntity)
+
+    @Update
+    suspend fun updatePlugin(plugin: PluginEntity)
+
+    @Query("DELETE FROM plugins WHERE id = :id")
+    suspend fun deletePlugin(id: String)
+
     @Insert
     suspend fun insertAuditLog(log: AuditLogEntity)
 
@@ -129,7 +164,7 @@ interface BotDao {
     suspend fun deleteAuditLogsOlderThan(cutoff: Long)
 }
 
-@Database(entities = [ReminderEntity::class, CronJobEntity::class, AuditLogEntity::class, EventEntity::class, ClassScheduleEntity::class], version = 4)
+@Database(entities = [ReminderEntity::class, CronJobEntity::class, AuditLogEntity::class, EventEntity::class, ClassScheduleEntity::class, PluginEntity::class], version = 5)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun botDao(): BotDao
 

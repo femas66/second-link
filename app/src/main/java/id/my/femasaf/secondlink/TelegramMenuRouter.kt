@@ -155,6 +155,19 @@ class TelegramMenuRouter(
             InputKind.JADWAL_DELETE -> {
                 dispatchInput("/jadwal_delete $text", chatId, userId)
             }
+            InputKind.PLUGIN_ADD -> {
+                dispatchInput("/plugin_add $text", chatId, userId)
+            }
+            InputKind.PLUGIN_EDIT -> {
+                val target = pending.values["target"].orEmpty()
+                dispatchInput("/plugin_edit $target $text", chatId, userId)
+            }
+            InputKind.PLUGIN_DELETE -> {
+                dispatchInput("/plugin_delete $text", chatId, userId)
+            }
+            InputKind.PLUGIN_RUN -> {
+                dispatchInput("/plugin_run $text", chatId, userId)
+            }
         }
     }
 
@@ -209,6 +222,7 @@ class TelegramMenuRouter(
                 "web" -> MenuScreen.WEB
                 "event" -> MenuScreen.EVENT
                 "jadwal" -> MenuScreen.CLASS_SCHEDULE
+                "plugin", "plugins" -> MenuScreen.PLUGINS
                 "media" -> MenuScreen.MEDIA
                 "camera" -> MenuScreen.CAMERA
                 "device" -> MenuScreen.DEVICE
@@ -218,11 +232,12 @@ class TelegramMenuRouter(
             }
             return edit(callback, chatId, message.messageId, screenTitle(screen), TelegramKeyboard.render(screen, MenuRenderState()))
         }
-        if (parsed.scope == null && parsed.action in setOf("web", "event", "jadwal", "media", "camera", "device", "schedule", "file")) {
+        if (parsed.scope == null && parsed.action in setOf("web", "event", "jadwal", "plugin", "plugins", "media", "camera", "device", "schedule", "file")) {
             val screen = when (parsed.action) {
                 "web" -> MenuScreen.WEB
                 "event" -> MenuScreen.EVENT
                 "jadwal" -> MenuScreen.CLASS_SCHEDULE
+                "plugin", "plugins" -> MenuScreen.PLUGINS
                 "media" -> MenuScreen.MEDIA
                 "camera" -> MenuScreen.CAMERA
                 "device" -> MenuScreen.DEVICE
@@ -243,6 +258,8 @@ class TelegramMenuRouter(
             TelegramKeyboard.render(MenuScreen.EVENT, MenuRenderState())
         } else if (parsed.scope == "jadwal" || (parsed.scope == null && parsed.action == "jadwal")) {
             TelegramKeyboard.render(MenuScreen.CLASS_SCHEDULE, MenuRenderState())
+        } else if (parsed.scope == "plugin" || (parsed.scope == null && (parsed.action == "plugin" || parsed.action == "plugins"))) {
+            TelegramKeyboard.render(MenuScreen.PLUGINS, MenuRenderState())
         } else null
         return edit(callback, chatId, message.messageId, result.message ?: "✅ Selesai.", markup)
     }
@@ -284,6 +301,7 @@ class TelegramMenuRouter(
             "web" -> "/web"
             "event" -> "/events"
             "jadwal" -> "/jadwal"
+            "plugin", "plugins" -> "/plugins"
             else -> null
         }
         return when (parsed.scope to parsed.action) {
@@ -301,6 +319,9 @@ class TelegramMenuRouter(
             "jadwal" to "day_5" -> "/jadwal jumat"
             "jadwal" to "day_6" -> "/jadwal sabtu"
             "jadwal" to "day_7" -> "/jadwal minggu"
+            "plugin" to "list" -> "/plugins"
+            "plugin" to "samples" -> "/plugin_samples"
+            "plugin" to "docs" -> "/plugin_docs"
             "media" to "status" -> "/media status"
             "media" to "sessions", "media" to "list" -> "/media list"
             "media" to "play", "media" to "pause", "media" to "toggle", "media" to "next",
@@ -333,6 +354,9 @@ class TelegramMenuRouter(
             "event" to "delete" -> state.beginInput(chatId, callback.from.id, InputKind.EVENT_DELETE, now = now)
             "jadwal" to "add" -> state.beginInput(chatId, callback.from.id, InputKind.JADWAL_DAY, now = now)
             "jadwal" to "delete" -> state.beginInput(chatId, callback.from.id, InputKind.JADWAL_DELETE, now = now)
+            "plugin" to "add" -> state.beginInput(chatId, callback.from.id, InputKind.PLUGIN_ADD, now = now)
+            "plugin" to "delete" -> state.beginInput(chatId, callback.from.id, InputKind.PLUGIN_DELETE, now = now)
+            "plugin" to "run" -> state.beginInput(chatId, callback.from.id, InputKind.PLUGIN_RUN, now = now)
             "file" to "download" -> state.beginInput(chatId, callback.from.id, InputKind.DOWNLOAD_URL, now = now)
         }
         val text = when (scope to action) {
@@ -346,6 +370,9 @@ class TelegramMenuRouter(
             "event" to "delete" -> "🗑️ Kirim nomor urut atau ID event yang ingin dihapus, atau /cancel."
             "jadwal" to "add" -> "🎓 Kirim hari kuliah (contoh: Senin, Selasa, dst., atau angka 1-7), atau /cancel."
             "jadwal" to "delete" -> "🗑️ Kirim nomor urut jadwal kuliah yang ingin dihapus, atau /cancel."
+            "plugin" to "add" -> "🧩 Kirim kode YAML plugin lengkap sebagai pesan (atau kirim file .yaml), atau /cancel."
+            "plugin" to "delete" -> "🗑️ Kirim nama atau nomor plugin yang ingin dihapus, atau /cancel."
+            "plugin" to "run" -> "▶️ Kirim nama atau nomor plugin yang ingin dijalankan sekarang, atau /cancel."
             "file" to "download" -> "📁 Kirim URL HTTPS untuk memulai download."
             else -> "Aksi belum tersedia."
         }
@@ -432,6 +459,7 @@ class TelegramMenuRouter(
         MenuScreen.MAIN -> mainText()
         MenuScreen.CLASS_SCHEDULE -> "🎓 Jadwal Kuliah"
         MenuScreen.CLASS_SCHEDULE_DAYS -> "🔍 Pilih Hari Jadwal Kuliah"
+        MenuScreen.PLUGINS -> "🧩 Plugin Engine (YAML Dynamic Automation)"
         else -> "SecondLink Remote Control • ${screen.name.lowercase().replaceFirstChar { it.uppercase() }}"
     }
     private fun mainText() = "SecondLink Remote Control"

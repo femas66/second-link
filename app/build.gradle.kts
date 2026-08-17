@@ -72,6 +72,9 @@ dependencies {
     ksp("androidx.room:room-compiler:$room_version")
     // Note: If using KSP, use ksp instead of annotationProcessor
 
+    // YAML Engine for Dynamic Plugins
+    implementation("org.yaml:snakeyaml:2.2")
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

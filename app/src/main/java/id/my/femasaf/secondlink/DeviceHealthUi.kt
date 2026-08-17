@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -51,15 +50,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import id.my.femasaf.secondlink.ui.theme.status
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-private val SecondLinkIndigo = Color(0xFF4A3C8C)
-private val Ink = Color(0xFF1C1B1F)
-private val MutedInk = Color(0xFF625B71)
-private val Border = Color(0xFFE0E0E0)
-private val ScreenSurface = Color(0xFFF8F9FA)
 
 private data class HealthVisual(
     val label: String,
@@ -68,31 +62,39 @@ private data class HealthVisual(
     val icon: ImageVector
 )
 
-private fun healthVisual(level: HealthLevel): HealthVisual = when (level) {
-    HealthLevel.GOOD -> HealthVisual(
-        label = "Baik",
-        foreground = Color(0xFF1B5E20),
-        background = Color(0xFFE8F5E9),
-        icon = Icons.Default.CheckCircle
-    )
-    HealthLevel.WARNING -> HealthVisual(
-        label = "Perlu Perhatian",
-        foreground = Color(0xFF7A4300),
-        background = Color(0xFFFFF3E0),
-        icon = Icons.Default.Warning
-    )
-    HealthLevel.CRITICAL -> HealthVisual(
-        label = "Kritis",
-        foreground = Color(0xFFB71C1C),
-        background = Color(0xFFFFEBEE),
-        icon = Icons.Default.ErrorOutline
-    )
-    HealthLevel.UNAVAILABLE -> HealthVisual(
-        label = "Tidak Tersedia",
-        foreground = Color(0xFF37474F),
-        background = Color(0xFFECEFF1),
-        icon = Icons.Default.ErrorOutline
-    )
+@Composable
+private fun healthVisual(level: HealthLevel): HealthVisual {
+    val status = MaterialTheme.status
+    val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
+    val surfaceVariant = MaterialTheme.colorScheme.surfaceVariant
+    val onErrorContainer = MaterialTheme.colorScheme.onErrorContainer
+    val errorContainer = MaterialTheme.colorScheme.errorContainer
+    return when (level) {
+        HealthLevel.GOOD -> HealthVisual(
+            label = "Baik",
+            foreground = status.onSuccessContainer,
+            background = status.successContainer,
+            icon = Icons.Default.CheckCircle
+        )
+        HealthLevel.WARNING -> HealthVisual(
+            label = "Perlu Perhatian",
+            foreground = status.onWarningContainer,
+            background = status.warningContainer,
+            icon = Icons.Default.Warning
+        )
+        HealthLevel.CRITICAL -> HealthVisual(
+            label = "Kritis",
+            foreground = onErrorContainer,
+            background = errorContainer,
+            icon = Icons.Default.ErrorOutline
+        )
+        HealthLevel.UNAVAILABLE -> HealthVisual(
+            label = "Tidak Tersedia",
+            foreground = onSurfaceVariant,
+            background = surfaceVariant,
+            icon = Icons.Default.ErrorOutline
+        )
+    }
 }
 
 @Composable
@@ -108,9 +110,9 @@ fun DeviceHealthSummaryCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onOpen),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = BorderStroke(1.dp, Border),
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
@@ -124,7 +126,7 @@ fun DeviceHealthSummaryCard(
                         text = "Device Health",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
-                        color = Ink
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(Modifier.height(8.dp))
                     HealthStatusPill(visual)
@@ -132,7 +134,7 @@ fun DeviceHealthSummaryCard(
                 Icon(
                     imageVector = Icons.Default.ChevronRight,
                     contentDescription = "Buka detail kesehatan perangkat",
-                    tint = SecondLinkIndigo
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
 
@@ -146,7 +148,7 @@ fun DeviceHealthSummaryCard(
                     else -> "Buka untuk memeriksa kondisi perangkat."
                 },
                 style = MaterialTheme.typography.bodyMedium,
-                color = Ink
+                color = MaterialTheme.colorScheme.onSurface
             )
             snapshot?.let {
                 Spacer(Modifier.height(8.dp))
@@ -154,15 +156,15 @@ fun DeviceHealthSummaryCard(
                     text = "Diperiksa ${formatCheckedTime(it.checkedAtMillis)}",
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
-                    color = MutedInk
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             if (isRefreshing) {
                 Spacer(Modifier.height(12.dp))
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth(),
-                    color = SecondLinkIndigo,
-                    trackColor = Color(0xFFE8E5F1)
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
             }
         }
@@ -181,7 +183,7 @@ fun DeviceHealthScreen(
 ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        containerColor = ScreenSurface,
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("Device Health") },
@@ -203,8 +205,8 @@ fun DeviceHealthScreen(
             if (isRefreshing) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth(),
-                    color = SecondLinkIndigo,
-                    trackColor = Color(0xFFE8E5F1)
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
                 Spacer(Modifier.height(16.dp))
             }
@@ -216,9 +218,9 @@ fun DeviceHealthScreen(
                 onClick = onRefresh,
                 enabled = !isRefreshing,
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = SecondLinkIndigo),
-                border = BorderStroke(1.dp, SecondLinkIndigo),
-                shape = RoundedCornerShape(8.dp)
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                shape = MaterialTheme.shapes.small
             ) {
                 Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.size(8.dp))
@@ -242,7 +244,7 @@ fun DeviceHealthScreen(
                 Text(
                     text = "Belum ada data kesehatan. Tekan Periksa Sekarang untuk mencoba kembali.",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = Ink
+                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
 
@@ -257,7 +259,7 @@ private fun DeviceHealthOverview(snapshot: DeviceHealthSnapshot?, error: String?
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(visual.background, RoundedCornerShape(12.dp))
+            .background(visual.background, MaterialTheme.shapes.medium)
             .padding(20.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -303,19 +305,19 @@ private fun DeviceHealthSection(
         text = title,
         style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.SemiBold,
-        color = Ink
+        color = MaterialTheme.colorScheme.onSurface
     )
     Spacer(Modifier.height(10.dp))
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.White, RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface, MaterialTheme.shapes.medium)
             .padding(horizontal = 16.dp)
     ) {
         items.forEachIndexed { index, item ->
             DeviceHealthRow(item, onAction)
             if (index != items.lastIndex) {
-                HorizontalDivider(color = Border)
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
     }
@@ -338,27 +340,27 @@ private fun DeviceHealthRow(
                     text = item.title,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = Ink
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
                     text = item.value,
                     style = MaterialTheme.typography.bodyLarge,
                     fontFamily = FontFamily.Monospace,
-                    color = Ink
+                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
             Spacer(Modifier.size(12.dp))
             HealthStatusPill(visual)
         }
         Spacer(Modifier.height(8.dp))
-        Text(item.detail, style = MaterialTheme.typography.bodySmall, color = MutedInk)
+        Text(item.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         item.action?.let { action ->
             TextButton(
                 onClick = { onAction(action) },
                 contentPadding = ButtonDefaults.TextButtonContentPadding
             ) {
-                Text(actionLabel(action), color = SecondLinkIndigo, fontWeight = FontWeight.SemiBold)
+                Text(actionLabel(action), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
             }
         }
     }
